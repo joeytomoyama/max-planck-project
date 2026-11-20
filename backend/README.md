@@ -21,7 +21,7 @@ This starts:
 
 ```bash
 # Database connection
-DATABASE_URL=postgresql://postgres:secretpgpass@db:5432/max_planck_project
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/max_planck_project
 
 # Optional: Create seed session on startup
 export CREATE_SEED=true

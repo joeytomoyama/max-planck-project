@@ -24,7 +24,7 @@ Copy `.env.example` to `.env` and customize:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_PASSWORD` | `secretpgpass` | PostgreSQL admin password |
+| `POSTGRES_PASSWORD` | `postgres` | PostgreSQL admin password (local placeholder) |
 | `POSTGRES_DB` | `max_planck_project` | Database name |
 | `BACKEND_PORT` | `8000` | Backend API port |
 | `FRONTEND_PORT` | `3000` | Frontend web interface port |

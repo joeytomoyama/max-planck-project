@@ -84,7 +84,7 @@ volumes:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| POSTGRES_PASSWORD | `secretpgpass` | DB admin password |
+| POSTGRES_PASSWORD | `postgres` | DB admin password (local placeholder) |
 | POSTGRES_DB | `max_planck_project` | Database name |
 | BACKEND_PORT | `8000` | API port |
 | FRONTEND_PORT | `3000` | Web interface port |

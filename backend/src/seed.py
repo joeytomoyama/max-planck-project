@@ -26,7 +26,7 @@ def create_seed_session(db_url: str = None):
         Session ID of the created session
     """
     if not db_url:
-        db_url = os.getenv("DATABASE_URL", "postgresql://postgres:secretpgpass@db:5432/max_planck_project")
+        db_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/max_planck_project")
     
     conn = None
     try:

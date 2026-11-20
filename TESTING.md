@@ -21,7 +21,11 @@ Run Python tests to verify schema:
 
 ```bash
 cd backend
-python -m pytest tests/test_database.py -v
+# Schema tests need a live PostgreSQL and are skipped by default.
+RUN_DB_INTEGRATION_TESTS=true python -m pytest tests/test_database.py -v
+
+# Unit tests (no database required):
+python -m pytest tests -q
 ```
 
 ### Manual SQL Initialization

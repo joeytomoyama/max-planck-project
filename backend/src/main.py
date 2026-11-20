@@ -4,52 +4,47 @@ Handles sessions, WebSocket communication, and REST endpoints.
 Uses sync database operations with psycopg2-binary.
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import create_engine, text, Column, Integer, String, DateTime, ForeignKey, Enum
-from sqlalchemy.orm import declarative_base, Session, sessionmaker
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 import os
 from datetime import datetime, timedelta
 import uuid
 
 app = FastAPI(title="Max Planck Project Backend")
 
-# Database setup - using sync psycopg2-binary which works with PostgreSQL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:secretpgpass@db:5432/max_planck_project")
-
-from sqlalchemy import create_engine
+# SQLAlchemy 2.x maps the bare `postgresql://` scheme to psycopg3, but this
+# project installs psycopg2-binary, so the driver must be named explicitly.
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@db:5432/max_planck_project",
+)
 engine = create_engine(DATABASE_URL, echo=os.getenv("DEBUG") == "true")
 local_session = sessionmaker(engine, expire_on_commit=False)
 
-# Create a thread-local storage for active WebSocket connections
+# Process-global WebSocket registry; guarded by a lock, not thread-local
 import threading
 active_sessions_lock = threading.Lock()
 active_sessions = {}
 
-# Initialize static files directory for React build
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-if not os.path.exists(STATIC_DIR):
-    os.makedirs(STATIC_DIR)
+# index.html lives in backend/static, one level above this module's directory.
+STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 
 
 def init_database():
-    """Initialize database with proper schema and seed data."""
-    from psycopg2 import sql
-    
-    conn = local_session().connection()
-    
-    # Drop existing tables if they exist (for clean initialization)
-    conn.execute(text("DROP TABLE IF EXISTS rooms CASCADE"))
-    conn.execute(text("DROP TABLE IF EXISTS votes CASCADE"))
-    conn.execute(text("DROP TABLE IF EXISTS rounds CASCADE"))
-    conn.execute(text("DROP TABLE IF EXISTS participants CASCADE"))
-    conn.execute(text("DROP TABLE IF EXISTS sessions CASCADE"))
-    conn.commit()
-    
+    """Create the schema if it does not exist; never drop live session data."""
+    with local_session() as session:
+        conn = session.connection()
+        _create_schema(conn)
+        conn.commit()
+
+
+def _create_schema(conn):
+    """Create all tables used by the experiment."""
     # Create sessions table with oom_code as unique identifier
     conn.execute(text("""
-        CREATE TABLE sessions (
+        CREATE TABLE IF NOT EXISTS sessions (
             id SERIAL PRIMARY KEY,
             oom_code VARCHAR(64) UNIQUE NOT NULL,
             status VARCHAR(20) DEFAULT 'waiting',
@@ -60,7 +55,7 @@ def init_database():
     
     # Create participants table with type enum and last_activity
     conn.execute(text("""
-        CREATE TABLE participants (
+        CREATE TABLE IF NOT EXISTS participants (
             session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
             id VARCHAR(20) UNIQUE NOT NULL PRIMARY KEY,  -- e.g., "Player A", "Player B"
             type VARCHAR(10) NOT NULL DEFAULT 'human' CHECK (type IN ('human', 'ai')),
@@ -71,7 +66,7 @@ def init_database():
     
     # Create rounds table with JSONB vote results
     conn.execute(text("""
-        CREATE TABLE rounds (
+        CREATE TABLE IF NOT EXISTS rounds (
             session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
             round_number INTEGER NOT NULL,
             discussion_start TIMESTAMP,
@@ -82,7 +77,7 @@ def init_database():
     
     # Create votes table
     conn.execute(text("""
-        CREATE TABLE votes (
+        CREATE TABLE IF NOT EXISTS votes (
             id SERIAL PRIMARY KEY,
             session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
             participant_id VARCHAR(20) NOT NULL REFERENCES participants(id),
@@ -90,54 +85,37 @@ def init_database():
             cast_at TIMESTAMP DEFAULT NOW()
         )
     """))
-    
-    conn.commit()
 
 
-def create_seed_session(session_id: int = None):
+def create_seed_session(session_id: str = None):
     """Create a demo session with 3 participants for local testing."""
-    from psycopg2 import sql
-    
-    conn = local_session().connection()
-    
-    # Generate or use provided session ID
     if session_id is None:
         session_id = uuid.uuid4().hex[:12]
-    
+
     expires_at = datetime.now() + timedelta(hours=2)
-    
-    # Insert seed session
-    conn.execute(text("""
-        INSERT INTO sessions (id, oom_code, status, created_at, expires_at) 
-        VALUES (%s, %s, %s, NOW(), %s)
-    """), (session_id, f"oom-{session_id}", 'waiting', expires_at))
-    
-    # Insert 3 participants (2 human, 1 AI)
-    participant_ids = ["Player A", "Player B", "Player C"]
-    participant_types = ["human", "human", "ai"]
-    
-    for pid, ptype in zip(participant_ids, participant_types):
-        conn.execute(text("""
-            INSERT INTO participants (session_id, id, type, joined_at, last_activity) 
-            VALUES (%s, %s, %s, NOW(), NOW())
-        """), (session_id, pid, ptype))
-    
-    conn.commit()
+
+    with local_session() as session:
+        conn = session.connection()
+        # SQLAlchemy text() uses :name bind parameters, not psycopg2's %s.
+        conn.execute(
+            text("""
+                INSERT INTO sessions (id, oom_code, status, created_at, expires_at)
+                VALUES (:id, :oom_code, :status, NOW(), :expires_at)
+            """),
+            {"id": session_id, "oom_code": f"oom-{session_id}", "status": "waiting", "expires_at": expires_at},
+        )
+
+        for pid, ptype in zip(("Player A", "Player B", "Player C"), ("human", "human", "ai")):
+            conn.execute(
+                text("""
+                    INSERT INTO participants (session_id, id, type, joined_at, last_activity)
+                    VALUES (:session_id, :id, :type, NOW(), NOW())
+                """),
+                {"session_id": session_id, "id": pid, "type": ptype},
+            )
+
+        conn.commit()
     return session_id
-
-
-@app.get("/*", include_in_schema=False)
-async def serve_frontend(request: Request):
-    """Serve React frontend app with API routes accessible via /api/ prefix."""
-    if request.scope['method'] == 'GET' and 'index.html' not in STATIC_DIR:
-        # Serve index.html for all non-API paths
-        try:
-            return FileResponse(os.path.join(STATIC_DIR, "index.html"))
-        except FileNotFoundError:
-            from fastapi.responses import HTMLResponse
-            return HTMLResponse("<html><head><title>SPA App</title></head><body>Loading...</body></html>")
-    # For API routes, let them pass through
-    raise HTTPException(status_code=404, detail="Not Found")
 
 
 @app.get("/api/sessions")
@@ -156,19 +134,19 @@ async def get_session(session_id: str):
     """Get session details."""
     with local_session() as session:
         result = session.execute(
-            text("SELECT s.*, ROUND(EXTRACT(EPOCH FROM (expires_at - NOW()))::NUMERIC, 1) as time_remaining FROM sessions s WHERE s.id = :id"),
+            text("SELECT s.*, ROUND(EXTRACT(EPOCH FROM (expires_at - NOW()))::NUMERIC, 1) as time_remaining_seconds FROM sessions s WHERE s.id = :id"),
             {"id": session_id}
         )
-        row = result.scalar_one_or_none()
+        row = result.mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="Session not found")
-        
+
         participants_result = session.execute(
-            text("SELECT id, type, joined_at, last_activity FROM participants WHERE session_id = :id ORDER BY id"),
+            text("SELECT id, joined_at, last_activity FROM participants WHERE session_id = :id ORDER BY id"),
             {"id": session_id}
         )
-        participants = [list(r) for r in participants_result]
-        
+        participants = [dict(r) for r in participants_result.mappings()]
+
         return {"session": dict(row), "participants": participants}
 
 
@@ -180,6 +158,7 @@ async def start_session(session_id: str):
             text("UPDATE sessions SET status = 'active' WHERE id = :id"),
             {"id": session_id}
         )
+        session.commit()
         return {"status": "active"}
 
 
@@ -188,28 +167,28 @@ async def get_session_config(session_id: str):
     """Get current config and participants for a session."""
     with local_session() as session:
         result = session.execute(
-            text("SELECT s.*, ROUND(EXTRACT(EPOCH FROM (expires_at - NOW()))::NUMERIC, 1) as time_remaining FROM sessions s WHERE s.id = :id"),
+            text("SELECT s.*, ROUND(EXTRACT(EPOCH FROM (expires_at - NOW()))::NUMERIC, 1) as time_remaining_seconds FROM sessions s WHERE s.id = :id"),
             {"id": session_id}
         )
-        row = result.scalar_one_or_none()
+        row = result.mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="Session not found")
-        
+
         participants_result = session.execute(
-            text("SELECT id, type, joined_at, last_activity FROM participants WHERE session_id = :id ORDER BY id"),
+            text("SELECT id, joined_at, last_activity FROM participants WHERE session_id = :id ORDER BY id"),
             {"id": session_id}
         )
-        participants = [list(r) for r in participants_result]
-        
+        participants = [dict(r) for r in participants_result.mappings()]
+
         return {
             "session": {
-                "id": row[0],
-                "oom_code": row[1],
-                "status": row[2],
-                "expires_at": str(row[3])
+                "id": row["id"],
+                "oom_code": row["oom_code"],
+                "status": row["status"],
+                "expires_at": str(row["expires_at"]),
             },
-            "time_remaining": row[4],
-            "participants": participants
+            "time_remaining_seconds": row["time_remaining_seconds"],
+            "participants": participants,
         }
 
 
@@ -219,8 +198,8 @@ async def add_participant(session_id: str, participant_data: dict):
     with local_session() as session:
         # Check session exists and is active
         result = session.execute(text("SELECT id, status FROM sessions WHERE id = :id"), {"id": session_id})
-        row = result.scalar_one_or_none()
-        if not row or row[1] != 'waiting':
+        row = result.mappings().first()
+        if not row or row["status"] != "waiting":
             raise HTTPException(status_code=400, detail="Session must be in waiting status to add participants")
         
         participant_id = participant_data.get("id")
@@ -243,58 +222,72 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
     # Check session exists and is active
     with local_session() as session:
         result = session.execute(text("SELECT id, status FROM sessions WHERE id = :id"), {"id": session_id})
-        row = result.scalar_one_or_none()
-        if not row or row[1] != 'active':
+        row = result.mappings().first()
+        if not row or row["status"] != "active":
             await websocket.close(code=4001)  # Session expired or not active
             return
-        
-        participant_id = f"Player {len(active_sessions.get(session_id, [])) + 1}"
-        
+
+        with active_sessions_lock:
+            participant_id = f"Player {len(active_sessions.get(session_id, [])) + 1}"
+
         with local_session() as participant_session:
-            participant_session.execute(text("""
-                INSERT INTO participants (session_id, id, type, joined_at, last_activity) 
-                VALUES (:session_id, :id, 'human', NOW(), NOW())
-            """), {"session_id": session_id, "id": participant_id})
-            
+            participant_session.execute(
+                text("""
+                    INSERT INTO participants (session_id, id, type, joined_at, last_activity)
+                    VALUES (:session_id, :id, 'human', NOW(), NOW())
+                """),
+                {"session_id": session_id, "id": participant_id},
+            )
+            participant_session.commit()
+
             with active_sessions_lock:
-                if session_id not in active_sessions:
-                    active_sessions[session_id] = []
-                active_sessions[session_id].append(websocket)
-    
+                active_sessions.setdefault(session_id, []).append(websocket)
+
     try:
         while True:
-            data = websocket.receive_text()
-            
+            data = await websocket.receive_text()
+
             if data == "ping":
                 await websocket.send_text("pong")
             elif data.startswith("chat:") or data.startswith("vote:"):
-                # Handle chat message or voting
-                message_content = data[5:]  # Remove "chat:" or "vote:" prefix
-                broadcast(f"{session_id}: {message_content}")
+                message_content = data[5:]  # Drop the "chat:"/"vote:" prefix
+                await broadcast(f"{session_id}: {message_content}")
     except WebSocketDisconnect:
+        with active_sessions_lock:
+            if websocket in active_sessions.get(session_id, []):
+                active_sessions[session_id].remove(websocket)
+
         with local_session() as session:
-            session.execute(text("""
-                DELETE FROM participants WHERE session_id = :id AND id IN (
-                    SELECT p.id FROM participants p WHERE p.session_id = :sid
-                )
-            """), {"id": session_id, "sid": session_id})
+            session.execute(
+                text("DELETE FROM participants WHERE session_id = :session_id AND id = :participant_id"),
+                {"session_id": session_id, "participant_id": participant_id},
+            )
+            session.commit()
+
+
+def session_id_from_message(message: str):
+    """Return the session-id prefix of a broadcast message, or None if absent."""
+    if ":" not in message:
+        return None
+    session_id = message.split(":", 1)[0].strip()
+    return session_id or None
 
 
 async def broadcast(message: str):
-    """Broadcast message to all connected clients in a session."""
+    """Broadcast a message to all clients connected to the given session."""
+    session_id = session_id_from_message(message)
+    if session_id is None:
+        return
+
+    # Snapshot the sockets under the lock; never hold it across an await.
     with active_sessions_lock:
-        if ":" in message:
-            try:
-                session_key = int(message.split(":")[0])
-            except ValueError:
-                return
-        
-        if session_key is not None and session_key in active_sessions:
-            for websocket in active_sessions[session_key]:
-                try:
-                    await websocket.send_text(message)
-                except Exception:
-                    break
+        sockets = list(active_sessions.get(session_id, ()))
+
+    for websocket in sockets:
+        try:
+            await websocket.send_text(message)
+        except Exception:
+            continue
 
 
 @app.post("/api/sessions/{session_id}/vote")
@@ -331,56 +324,22 @@ async def cast_vote(session_id: str, vote_data: dict):
         return {"status": "ok"}
 
 
-def create_tables(conn):
-    """Legacy function - removed in favor of init_database()."""
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id SERIAL PRIMARY KEY,
-            oom_code VARCHAR(64) UNIQUE NOT NULL,
-            status VARCHAR(20) DEFAULT 'waiting',
-            created_at TIMESTAMP DEFAULT NOW(),
-            expires_at TIMESTAMP
-        )
-    """))
-    
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS participants (
-            session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
-            id VARCHAR(20) UNIQUE NOT NULL PRIMARY KEY,
-            type VARCHAR(10) NOT NULL DEFAULT 'human' CHECK (type IN ('human', 'ai')),
-            joined_at TIMESTAMP DEFAULT NOW(),
-            last_activity TIMESTAMP DEFAULT NOW()
-        )
-    """))
-    
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS rounds (
-            session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
-            round_number INTEGER NOT NULL,
-            discussion_start TIMESTAMP,
-            discussion_end TIMESTAMP,
-            vote_results JSONB
-        )
-    """))
-    
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS votes (
-            id SERIAL PRIMARY KEY,
-            session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
-            participant_id VARCHAR(20) NOT NULL REFERENCES participants(id),
-            target_participant VARCHAR(20) NOT NULL REFERENCES participants(id),
-            cast_at TIMESTAMP DEFAULT NOW()
-        )
-    """))
-    
-    conn.commit()
-
-
 @app.on_event("startup")
 async def on_startup():
     """Initialize database tables on startup."""
-    with local_session() as session:
-        init_database(session.connection())
+    init_database()
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_frontend(full_path: str):
+    """Serve the SPA for non-API paths; API misses stay JSON 404s."""
+    if full_path.split("/", 1)[0] in {"api", "ws"}:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return HTMLResponse('<!doctype html><html><body><div id="root"></div></body></html>')
 
 
 # Seed data initialization (create demo session if requested)

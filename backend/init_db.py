@@ -24,7 +24,8 @@ def initialize_database(create_seed: bool = False):
     """
     from psycopg2 import connect, OperationalError
     
-    db_url = os.getenv("DATABASE_URL", "postgresql://postgres:secretpgpass@db:5432/max_planck_project")
+    # psycopg2.connect() needs a libpq DSN/URI, not SQLAlchemy's +driver scheme.
+    db_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/max_planck_project")
     
     conn = None
     try:

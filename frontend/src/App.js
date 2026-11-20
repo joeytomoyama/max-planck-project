@@ -1,5 +1,15 @@
-import React, { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import React, { useEffect, useRef, useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from 'react-router-dom';
+
+const API_BASE = (process.env.REACT_APP_API_URL || '').replace(/\/$/, '');
+
+function websocketUrl(sessionId) {
+  if (!API_BASE) {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${protocol}://${window.location.host}/ws/${sessionId}`;
+  }
+  return `${API_BASE.replace(/^http/, 'ws')}/ws/${sessionId}`;
+}
 
 function App() {
   return (
@@ -14,53 +24,54 @@ function App() {
 }
 
 function WaitingRoom() {
-  const [roomCode, setRoomCode] = useState(null);
+  const [roomCode, setRoomCode] = useState('');
   const [config, setConfig] = useState(null);
 
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash.slice(1) || '';
-      if (hash) {
-        const parts = hash.split('?');
-        setRoomCode(parts[0]);
-        const params = new URLSearchParams(parts[1]).toString();
-        fetch(`/api/rooms/${roomCode}?${params}`)
-          .then(res => res.json())
-          .then(setConfig);
+      if (!hash) {
+        setConfig(null);
+        return;
       }
+      const [code, query] = hash.split('?');
+      setRoomCode(code);
+      const params = query ? `?${query}` : '';
+      fetch(`${API_BASE}/api/rooms/${encodeURIComponent(code)}${params}`)
+        .then((res) => res.json())
+        .then(setConfig)
+        .catch(() => setConfig(null));
     };
 
     window.addEventListener('hashchange', handleHashChange);
     handleHashChange();
-
     return () => window.removeEventListener('hashchange', handleHashChange);
-  }, [roomCode]);
-
-  const handleChange = (e) => {
-    setRoomCode(e.target.value);
-    if (e.target.value) {
-      const hash = `#${e.target.value}${window.location.search}`;
-      window.history.replaceState({}, '', hash);
-    } else {
-      window.history.replaceState({}, '', '');
-    }
-  };
+  }, []);
 
   const handleCreate = () => {
-    const parts = ['room', Math.floor(Math.random() * 900) + 100].join('');
-    setRoomCode(parts);
-    const hash = `#${parts}${window.location.search}`;
-    window.history.replaceState({}, '', hash);
-    fetch(`/api/rooms/${parts}`)
-      .then(res => res.json())
-      .then(setConfig);
+    const code = `room${Math.floor(Math.random() * 900) + 100}`;
+    setRoomCode(code);
+    window.history.replaceState({}, '', `#${code}`);
+    fetch(`${API_BASE}/api/rooms/${code}`)
+      .then((res) => res.json())
+      .then(setConfig)
+      .catch(() => setConfig(null));
   };
 
   if (!roomCode) {
     return (
       <div style={styles.container}>
         <h1>Waiting Room</h1>
-        <input type="text" value={roomCode} onChange={handleChange} placeholder="Enter room code or generate new one" />
+        <input
+          type="text"
+          value={roomCode}
+          onChange={(e) => {
+            const value = e.target.value;
+            setRoomCode(value);
+            window.history.replaceState({}, '', value ? `#${value}` : '');
+          }}
+          placeholder="Enter room code or generate new one"
+        />
         <button onClick={handleCreate}>Create New Session</button>
       </div>
     );
@@ -70,13 +81,13 @@ function WaitingRoom() {
     return (
       <div style={styles.container}>
         <h2>Waiting Room - {roomCode}</h2>
-        <p>Time remaining: {Math.ceil(config.time_remaining_seconds / 60)} min</p>
+        <p>Time remaining: {Math.ceil((config.time_remaining_seconds || 0) / 60)} min</p>
         <ul>
-          {config.participants.map(p => (
-            <li key={p.participantId}>{p.name} ({p.type})</li>
+          {(config.participants || []).map((p) => (
+            <li key={p.id}>{p.id}</li>
           ))}
         </ul>
-        <button onClick={() => window.location.hash = ''}>Leave Session</button>
+        <button onClick={() => (window.location.hash = '')}>Leave Session</button>
       </div>
     );
   }
@@ -85,66 +96,52 @@ function WaitingRoom() {
 }
 
 function ExperimentRoom() {
+  const { sessionId } = useParams();
   const [session, setSession] = useState(null);
-  const [message, setMessage] = useState('');
+  const [participants, setParticipants] = useState([]);
+  const [chatLog, setChatLog] = useState('');
+  const [draft, setDraft] = useState('');
+  const wsRef = useRef(null);
 
   useEffect(() => {
-    const sessionId = window.location.pathname.split('/').pop();
-    
-    fetch(`/api/sessions/${sessionId}`)
-      .then(res => res.json())
-      .then(setSession);
-
-    if (window.location.hash) {
-      const params = new URLSearchParams(window.location.hash.slice(1)).toString();
-      fetch(`/api/sessions/${sessionId}/config?${params}`)
-        .then(res => res.json())
-        .then(config => {
-          setSession(prev => ({ ...prev, time_remaining: config.time_remaining_seconds }));
-        });
-    }
-
-    const handleHashChange = () => {
-      if (window.location.hash) {
-        const params = new URLSearchParams(window.location.hash.slice(1)).toString();
-        fetch(`/api/sessions/${sessionId}/config?${params}`)
-          .then(res => res.json())
-          .then(config => {
-            setSession(prev => ({ ...prev, time_remaining: config.time_remaining_seconds }));
-          });
-      }
+    let active = true;
+    fetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (active) {
+          setSession(data.session);
+          setParticipants(data.participants || []);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
     };
-
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session) return undefined;
 
-    const ws = new WebSocket(`ws://localhost:8000/ws/${session.id}`);
-
+    const ws = new WebSocket(websocketUrl(session.id));
+    wsRef.current = ws;
     ws.onmessage = (event) => {
-      setMessage(prev => prev + `\n${event.data}`);
+      setChatLog((prev) => `${prev}\n${event.data}`.trim());
     };
-
     ws.onerror = () => {
-      if (session && session.status === 'active') {
-        window.location.href = `/waiting`;
-      }
+      if (session.status === 'active') window.location.href = '/waiting';
     };
 
-    return () => ws.close();
+    return () => {
+      wsRef.current = null;
+      ws.close();
+    };
   }, [session]);
 
   const handleChat = () => {
-    if (message.trim() && session) {
-      fetch(`/api/rooms/${session.room_code}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message })
-      }).catch(() => {});
-    }
+    const text = draft.trim();
+    if (!text || !wsRef.current) return;
+    wsRef.current.send(`chat:${text}`);
+    setDraft('');
   };
 
   if (!session) return <div>Loading...</div>;
@@ -153,23 +150,26 @@ function ExperimentRoom() {
     <div style={styles.container}>
       <h2>Experiment Room {session.id}</h2>
       <p>Status: {session.status}</p>
-      <p>Time remaining: {Math.ceil(session.time_remaining / 60)} min</p>
-      
+      <p>Time remaining: {Math.ceil((session.time_remaining_seconds || 0) / 60)} min</p>
+
       <div style={styles.chat}>
-        {message && <pre>{message}</pre>}
-        <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} />
+        {chatLog && <pre>{chatLog}</pre>}
+        <input
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="Type a message"
+        />
         <button onClick={handleChat}>Send Message</button>
       </div>
 
       <div style={styles.participants}>
         <h3>Participants</h3>
-        {session.time_remaining > 0 && config && (
-          <ul>
-            {config.participants.map(p => (
-              <li key={p.participantId}>{p.name} ({p.type})</li>
-            ))}
-          </ul>
-        )}
+        <ul>
+          {participants.map((p) => (
+            <li key={p.id}>{p.id}</li>
+          ))}
+        </ul>
       </div>
     </div>
   );
@@ -178,7 +178,7 @@ function ExperimentRoom() {
 const styles = {
   container: { fontFamily: 'sans-serif', padding: '20px' },
   chat: { marginBottom: '20px' },
-  participants: { border: '1px solid #ccc', padding: '10px' }
+  participants: { border: '1px solid #ccc', padding: '10px' },
 };
 
 export default App;

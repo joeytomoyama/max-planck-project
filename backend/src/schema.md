@@ -10,11 +10,11 @@ This document describes the PostgreSQL database schema for the Max Planck Projec
 - **Port**: 5432
 - **Database**: `max_planck_project`
 - **User**: `postgres`
-- **Password**: `secretpgpass`
+- **Password**: `${POSTGRES_PASSWORD}` (see `.env.example`)
 
 Environment variable:
 ```bash
-DATABASE_URL=postgresql://postgres:secretpgpass@db:5432/max_planck_project
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/max_planck_project
 ```
 
 ## Tables

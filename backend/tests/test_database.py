@@ -9,9 +9,12 @@ import os
 import sys
 import pytest
 from datetime import datetime
+from sqlalchemy import text
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+pytestmark = pytest.mark.integration
 
 
 def test_init_database_schema():
