@@ -1,0 +1,30 @@
+# Configuration for Max Planck Project experiment platform
+# Participant types and AI agent behavior configuration
+
+participant_configurations:
+  # Type 1: All humans (baseline human-only interaction)
+  - name: "3 Humans"
+    human_count: 3
+    ai_count: 0
+    
+  # Type 2: Mixed group with one AI agent
+  - name: "2 Humans + 1 AI"
+    human_count: 2
+    ai_count: 1
+    
+  # Type 3: Majority AI agents
+  - name: "1 Human + 2 AI"
+    human_count: 1
+    ai_count: 2
+
+# Default AI behavior settings
+ai_behavior:
+  response_delay_ms: 500  # Simulate thinking time
+  max_message_length: 500
+  temperature: 0.7  # Creativity for LLM responses (if enabled)
+
+# Mock mode - use deterministic mock responses instead of LLM API
+mock_llm: true
+
+# Seed for reproducible mock responses (useful for testing)
+mock_seed: 42
