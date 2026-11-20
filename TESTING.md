@@ -1,5 +1,45 @@
 # Testing Guide for Max Planck Project
 
+## Database Initialization and Seed Data
+
+### Creating a Demo Session for Local Testing
+
+To create a demo session with 3 participants (2 humans, 1 AI):
+
+```bash
+# Method 1: Using Python script
+python backend/src/seed.py
+
+# Method 2: Set environment variable to auto-create on startup
+export CREATE_SEED=true
+docker compose up -d backend
+```
+
+### Database Schema Verification
+
+Run Python tests to verify schema:
+
+```bash
+cd backend
+python -m pytest tests/test_database.py -v
+```
+
+### Manual SQL Initialization
+
+To manually create tables in PostgreSQL:
+
+```bash
+psql -h localhost -U postgres -d max_planck_project -f backend/migrations/001_initial_schema.sql
+```
+
+### Seed Data SQL (Optional)
+
+For manual seed data creation:
+
+```bash
+psql -h localhost -U postgres -d max_planck_project -f backend/migrations/002_seed_data.sql
+```
+
 ## Manual Verification Checklist
 
 ### Flow 1: Creating and Joining a Session
