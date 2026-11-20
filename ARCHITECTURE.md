@@ -99,16 +99,18 @@ max-planck-project/
 
 | Method | Path | Description |
 |--------|------|-------------|
+| POST | `/api/sessions` | Create a waiting session |
 | GET | `/api/sessions` | List recent sessions |
 | GET | `/api/sessions/:id` | Get session details |
-| GET | `/api/sessions/:id/start` | Activate waiting session |
+| POST | `/api/sessions/:id/start` | Activate waiting session |
 | GET | `/api/sessions/:id/config` | Get participants + config |
-| POST | `/api/rooms/:code` | Create new room |
+| POST | `/api/sessions/:id/votes` | Cast a blind vote |
 
 ### WebSocket `/ws/{session_id}`
-- Accepts chat messages as text
-- Sends broadcast updates to all clients
-- Closes on disconnect or session expiry
+- Accepts JSON frames: `{"type": "chat", "text": ...}` and `{"type": "vote", "target": ...}`
+- Broadcasts chat to all clients; the voter gets a private ack while peers get an anonymous vote notice
+- Rejects non-active/expired sessions on connect (close code 4001) and mid-session chat after closure
+- Closes on disconnect; see `backend/README.md` for the full frame contract
 
 ## Docker Compose Services
 

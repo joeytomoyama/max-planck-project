@@ -77,10 +77,53 @@ psql -h localhost -U postgres -d max_planck_project -f migrations/001_initial_sc
 
 ### Sessions
 
+- `POST /api/sessions` - Create a waiting session (201) with a server-generated
+  URL-safe room code and a 15-minute expiry. No request body; response is
+  `{"session": {...}}`.
 - `GET /api/sessions` - List recent sessions
-- `GET /api/sessions/{session_id}` - Get session details
-- `GET /api/sessions/{session_id}/start` - Start a waiting session
+- `GET /api/sessions/{session_id}` - Get session details, participants, and
+  `current_round` (the highest round number recorded so far, or null)
+- `POST /api/sessions/{session_id}/start` - Transition a waiting session to active
+- `GET /api/sessions/{session_id}/config` - Get session config and participants
 - `POST /api/sessions/{session_id}/participant` - Add participant
+- `POST /api/sessions/{session_id}/votes` - Cast a blind vote with
+  `{"from_participant": "Player A", "target": "Player B"}`. The response only
+  acknowledges the vote; it never includes the target, tallies, or other votes.
+  Non-waiting starts and votes on closed/expired sessions return 409, unknown
+  sessions 404, and invalid targets/self-votes 400.
+
+The legacy `GET .../start` and `POST .../vote` routes are gone.
+
+### WebSocket `/ws/{session_id}`
+
+JSON frames only; the session must be active and unexpired (otherwise the
+socket is closed with code 4001).
+
+Client → server:
+- `{"type": "chat", "text": "hello"}`
+- `{"type": "vote", "target": "Player B"}`
+- `{"type": "ping"}`
+
+Server → client:
+- `{"type": "chat", "text": "hello"}` (broadcast to everyone in the session)
+- `{"type": "vote_ack", "message": "Your vote has been recorded"}` (voter only)
+- `{"type": "vote_notice", "message": "A vote was cast"}` (everyone except the
+  voter — anonymous, so the target stays blind)
+- `{"type": "error", "message": "..."}` (invalid frame, invalid vote, closed session)
+- `{"type": "pong"}`
+
+Votes are validated and recorded before any frame is sent; a failed vote is
+never announced to peers. The old `chat:`/`vote:` text frames are no longer
+accepted, so the current frontend chat needs the ticket #04 rewrite.
+
+### Rate limiting
+
+There is no per-client rate limiting yet. The research setting has at most
+three participants per session and bounded round lengths, so the main risk is
+a stuck client flooding events. WebSocket frames are validated before any DB
+work, adding a duplicate-vote guard, and the session expiry check bounds how
+long a client can keep sending. Add connection/message throttling before any
+public or multi-session deployment.
 
 ### Rooms (Legacy)
 
@@ -107,10 +150,18 @@ This creates a session with 3 participants (2 humans, 1 AI) at `session_id` like
 
 ### Unit Tests
 
+Fast unit tests run without a database; DB-schema tests are opt-in integration
+tests because they need a live PostgreSQL instance.
+
 ```bash
 cd backend
-python -m pytest tests/test_database.py -v
+python -m pytest tests -v
+# with a live database:
+RUN_DB_INTEGRATION_TESTS=true python -m pytest tests -v
 ```
+
+Coverage: `test_api.py` (HTTP surface), `test_votes.py` (blind REST voting),
+`test_websocket.py` (JSON-frame channel), `test_database.py` (opt-in schema).
 
 ### Integration Tests
 
@@ -131,7 +182,11 @@ backend/
 ├── requirements.txt            # Python dependencies
 ├── tests/
 │   ├── __init__.py
-│   └── test_database.py        # Database unit tests
+│   ├── conftest.py             # Shared fakes and fixtures
+│   ├── test_api.py             # HTTP session API tests
+│   ├── test_votes.py           # Blind REST voting tests
+│   ├── test_websocket.py       # JSON-frame WebSocket tests
+│   └── test_database.py        # Opt-in live-DB schema tests
 ├── static/                     # React build output (served via StaticFiles)
 └── src/
     ├── __init__.py

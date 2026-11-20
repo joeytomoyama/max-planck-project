@@ -8,8 +8,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+import json
 import os
 from datetime import datetime, timedelta
+from typing import Optional
 import uuid
 
 app = FastAPI(title="Max Planck Project Backend")
@@ -87,6 +89,23 @@ def _create_schema(conn):
     """))
 
 
+SESSION_STATE_SQL = """
+    SELECT id, status, expires_at,
+           (expires_at IS NOT NULL AND expires_at <= NOW()) AS is_expired
+    FROM sessions WHERE id = :id
+"""
+
+
+def _load_session_state(session, session_id: str):
+    """Read a session's lifecycle state; expiry is computed by the database clock."""
+    return session.execute(text(SESSION_STATE_SQL), {"id": session_id}).mappings().first()
+
+
+def _is_open(state) -> bool:
+    """A session accepts interaction only while active and unexpired."""
+    return state is not None and state["status"] == "active" and not state["is_expired"]
+
+
 def create_seed_session(session_id: str = None):
     """Create a demo session with 3 participants for local testing."""
     if session_id is None:
@@ -118,6 +137,30 @@ def create_seed_session(session_id: str = None):
     return session_id
 
 
+SESSION_TIMEOUT_MINUTES = 15
+
+
+@app.post("/api/sessions", status_code=201)
+async def create_session():
+    """Create a waiting session with a server-generated, URL-safe room code."""
+    oom_code = f"oom-{uuid.uuid4().hex[:12]}"
+
+    with local_session() as session:
+        # Use the database clock so expiry is consistent with the is_expired
+        # check used everywhere else, regardless of the app host's timezone.
+        row = session.execute(
+            text("""
+                INSERT INTO sessions (oom_code, status, created_at, expires_at)
+                VALUES (:oom_code, 'waiting', NOW(), NOW() + make_interval(mins => :timeout_minutes))
+                RETURNING id, oom_code, status, created_at, expires_at
+            """),
+            {"oom_code": oom_code, "timeout_minutes": SESSION_TIMEOUT_MINUTES},
+        ).mappings().first()
+        session.commit()
+
+    return {"session": dict(row)}
+
+
 @app.get("/api/sessions")
 async def list_sessions(limit: int = 10):
     """List recent sessions."""
@@ -147,19 +190,34 @@ async def get_session(session_id: str):
         )
         participants = [dict(r) for r in participants_result.mappings()]
 
-        return {"session": dict(row), "participants": participants}
+        round_result = session.execute(
+            text("SELECT MAX(round_number) FROM rounds WHERE session_id = :id"),
+            {"id": session_id},
+        )
+
+        return {
+            "session": dict(row),
+            "participants": participants,
+            "current_round": round_result.scalar_one_or_none(),
+        }
 
 
-@app.get("/api/sessions/{session_id}/start")
+@app.post("/api/sessions/{session_id}/start")
 async def start_session(session_id: str):
-    """Start a waiting session."""
+    """Transition a waiting session to active; reject unknown or closed sessions."""
     with local_session() as session:
+        row = _load_session_state(session, session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if row["status"] != "waiting" or row["is_expired"]:
+            raise HTTPException(status_code=409, detail="Session is closed")
+
         session.execute(
-            text("UPDATE sessions SET status = 'active' WHERE id = :id"),
-            {"id": session_id}
+            text("UPDATE sessions SET status = 'active' WHERE id = :id AND status = 'waiting'"),
+            {"id": session_id},
         )
         session.commit()
-        return {"status": "active"}
+    return {"status": "active"}
 
 
 @app.get("/api/sessions/{session_id}/config")
@@ -219,11 +277,10 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
     """WebSocket endpoint for real-time chat and voting."""
     await websocket.accept()
     
-    # Check session exists and is active
+    # Only an active, unexpired session accepts new participants.
     with local_session() as session:
-        result = session.execute(text("SELECT id, status FROM sessions WHERE id = :id"), {"id": session_id})
-        row = result.mappings().first()
-        if not row or row["status"] != "active":
+        state = _load_session_state(session, session_id)
+        if not _is_open(state):
             await websocket.close(code=4001)  # Session expired or not active
             return
 
@@ -245,13 +302,48 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
 
     try:
         while True:
-            data = await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                await send_json(websocket, {"type": "error", "message": "Invalid message format"})
+                continue
+            if not isinstance(event, dict):
+                await send_json(websocket, {"type": "error", "message": "Invalid message format"})
+                continue
 
-            if data == "ping":
-                await websocket.send_text("pong")
-            elif data.startswith("chat:") or data.startswith("vote:"):
-                message_content = data[5:]  # Drop the "chat:"/"vote:" prefix
-                await broadcast(f"{session_id}: {message_content}")
+            event_type = event.get("type")
+
+            if event_type == "ping":
+                await send_json(websocket, {"type": "pong"})
+            elif event_type == "chat":
+                # A session can close while a socket is still connected.
+                with local_session() as session:
+                    state = _load_session_state(session, session_id)
+                if not _is_open(state):
+                    await send_json(websocket, {"type": "error", "message": "Session is closed"})
+                    continue
+                await broadcast_to_session(
+                    session_id,
+                    json.dumps({"type": "chat", "text": event.get("text", "")}),
+                )
+            elif event_type == "vote":
+                target_id = event.get("target", "")
+                try:
+                    _record_vote(session_id, participant_id, target_id)
+                except HTTPException as exc:
+                    # Errors stay private; a failed vote is not announced.
+                    await send_json(websocket, {"type": "error", "message": exc.detail})
+                    continue
+                await send_json(websocket, {"type": "vote_ack", "message": VOTE_ACK})
+                # Peers only learn that a vote happened, never what it was.
+                await broadcast_to_session(
+                    session_id,
+                    json.dumps({"type": "vote_notice", "message": VOTE_NOTICE}),
+                    exclude=websocket,
+                )
+            else:
+                await send_json(websocket, {"type": "error", "message": "Unknown message type"})
     except WebSocketDisconnect:
         with active_sessions_lock:
             if websocket in active_sessions.get(session_id, []):
@@ -265,63 +357,92 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
             session.commit()
 
 
-def session_id_from_message(message: str):
-    """Return the session-id prefix of a broadcast message, or None if absent."""
-    if ":" not in message:
-        return None
-    session_id = message.split(":", 1)[0].strip()
-    return session_id or None
+async def send_json(websocket: WebSocket, payload: dict) -> None:
+    """Send one JSON-encoded event frame to a single client."""
+    await websocket.send_text(json.dumps(payload))
 
 
-async def broadcast(message: str):
-    """Broadcast a message to all clients connected to the given session."""
-    session_id = session_id_from_message(message)
-    if session_id is None:
-        return
-
+async def broadcast_to_session(session_id: str, message: str, exclude: Optional[WebSocket] = None):
+    """Send a message to a session's clients, optionally skipping one socket."""
     # Snapshot the sockets under the lock; never hold it across an await.
     with active_sessions_lock:
         sockets = list(active_sessions.get(session_id, ()))
 
     for websocket in sockets:
+        if websocket is exclude:
+            continue
         try:
             await websocket.send_text(message)
         except Exception:
             continue
 
 
-@app.post("/api/sessions/{session_id}/vote")
-async def cast_vote(session_id: str, vote_data: dict):
-    """Cast a vote from a participant."""
+VOTE_ACK = "Your vote has been recorded"
+VOTE_NOTICE = "A vote was cast"
+
+
+def _record_vote(session_id: str, voter_id: str, target_id: str) -> None:
+    """Persist one vote, enforcing session state and participant membership.
+
+    Returns nothing: the blind condition is easiest to preserve when the
+    recording layer cannot hand a target or a tally back to its callers.
+    """
     with local_session() as session:
-        # Get participant's current activities to update last_activity
-        result = session.execute(
-            text("SELECT id FROM participants WHERE session_id = :id AND id = :participant_id"),
-            {"id": session_id, "participant_id": vote_data["from_participant"]}
+        state = _load_session_state(session, session_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if not _is_open(state):
+            raise HTTPException(status_code=409, detail="Session is closed")
+        if voter_id == target_id:
+            raise HTTPException(status_code=400, detail="Cannot vote for yourself")
+
+        participants = session.execute(
+            text("""
+                SELECT id FROM participants
+                WHERE session_id = :id AND id IN (:voter, :target)
+            """),
+            {"id": session_id, "voter": voter_id, "target": target_id},
+        ).mappings().all()
+        ids = {row["id"] for row in participants}
+        if voter_id not in ids:
+            raise HTTPException(status_code=404, detail="Voter is not a participant of this session")
+        if target_id not in ids:
+            raise HTTPException(status_code=404, detail="Target is not a participant of this session")
+
+        previous = session.execute(
+            text("SELECT id FROM votes WHERE session_id = :id AND participant_id = :voter"),
+            {"id": session_id, "voter": voter_id},
+        ).mappings().first()
+        if previous is not None:
+            raise HTTPException(status_code=409, detail="Vote already recorded")
+
+        session.execute(
+            text("""
+                INSERT INTO votes (session_id, participant_id, target_participant, cast_at)
+                VALUES (:session_id, :voter, :target, NOW())
+            """),
+            {"session_id": session_id, "voter": voter_id, "target": target_id},
         )
-        participant = result.scalar_one_or_none()
-        
-        if not participant:
-            raise HTTPException(status_code=404, detail="Participant not found")
-        
-        # Update last_activity
-        session.execute(text("""
-            UPDATE participants SET last_activity = NOW() 
-            WHERE id = :participant_id
-        """), {"participant_id": vote_data["from_participant"]})
-        
-        # Insert vote
-        session.execute(text("""
-            INSERT INTO votes (session_id, participant_id, target_participant, cast_at) 
-            VALUES (:session_id, :from_participant, :to_participant, NOW())
-        """), {
-            "session_id": session_id,
-            "from_participant": vote_data["from_participant"],
-            "to_participant": vote_data["target"]
-        })
-        
+        session.execute(
+            text("""
+                UPDATE participants SET last_activity = NOW()
+                WHERE session_id = :id AND id = :voter
+            """),
+            {"id": session_id, "voter": voter_id},
+        )
         session.commit()
-        return {"status": "ok"}
+
+
+@app.post("/api/sessions/{session_id}/votes")
+async def cast_vote(session_id: str, vote_data: dict):
+    """Cast a vote. The response never reveals another participant's choice."""
+    voter_id = vote_data.get("from_participant")
+    target_id = vote_data.get("target")
+    if not voter_id or not target_id:
+        raise HTTPException(status_code=400, detail="from_participant and target are required")
+
+    _record_vote(session_id, voter_id, target_id)
+    return {"status": "ok", "message": VOTE_ACK}
 
 
 @app.on_event("startup")
