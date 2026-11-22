@@ -1,4 +1,5 @@
 import useCountdown from "./useCountdown.js";
+import YouAre from "./YouAre.jsx";
 
 const NOTICES = {
   vote_closed: "Voting has closed.",
@@ -23,11 +24,7 @@ export default function VotingView({ playerLabel, playerLabels, round, deadline,
           {seconds}s left
         </span>
       </p>
-      {playerLabel && (
-        <p className="label" data-testid="player-label">
-          You are <strong>{playerLabel}</strong>
-        </p>
-      )}
+      <YouAre playerLabel={playerLabel} />
       {voted ? (
         <p className="recorded" data-testid="vote-recorded">
           Your vote has been recorded
