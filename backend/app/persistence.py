@@ -34,13 +34,18 @@ log = logging.getLogger(__name__)
 
 metadata = MetaData()
 
+# `sessions.status` values.
+WAITING, ACTIVE, COMPLETED, EXPIRED = "waiting", "active", "completed", "expired"
+# `participants.type` values: stored for the Researcher, never sent during a Session.
+HUMAN, AI = "human", "ai"
+
 sessions = Table(
     "sessions",
     metadata,
     Column("id", Integer, primary_key=True),
     Column("room_code", String(64), nullable=False, unique=True),
     Column("condition", String(32), nullable=False),
-    Column("status", String(16), nullable=False, server_default="waiting"),
+    Column("status", String(16), nullable=False, server_default=WAITING),
     Column("incomplete", Boolean, nullable=False, server_default="false"),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("last_activity", DateTime(timezone=True), nullable=False, server_default=func.now()),

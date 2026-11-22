@@ -35,8 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .config import AIAgentSettings
 from .llm import AgentView, ChatLine, LLMClient
-from .persistence import participants, sessions
-from .session_engine import DISCUSSION, VOTING, Event, JoinedParticipant, SessionEngine
+from .persistence import AI, participants, sessions
+from .session_engine import DISCUSSION, VOTING, Event, JoinedParticipant, PlayerLabel, SessionEngine
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class AIAgentRunner:
     ):
         self._engine = engine
         self._me = me
-        self._label = f"Player {me.player_label}"
+        self._label = PlayerLabel.format(me.player_label)
         self._settings = settings
         self._client = client
         self._rng = rng or random.Random()
@@ -160,7 +160,7 @@ class AIAgentRunner:
 
     def _parse_vote(self, answer: str) -> str | None:
         """First Player Label named in the answer ("Player B", "player b", or a bare "B")."""
-        letters = {label.removeprefix("Player "): label for label in self._ballot}
+        letters = {PlayerLabel.parse(label): label for label in self._ballot}
         match = re.search(r"\bplayer\s*([a-z])\b", answer, re.IGNORECASE) or re.fullmatch(
             r"\W*([a-z])\W*", answer, re.IGNORECASE
         )
@@ -205,7 +205,7 @@ class AIAgents:
                 await conn.execute(
                     select(participants.c.id, participants.c.session_id, participants.c.player_label)
                     .join(sessions, sessions.c.id == participants.c.session_id)
-                    .where(sessions.c.room_code == room_code, participants.c.type == "ai")
+                    .where(sessions.c.room_code == room_code, participants.c.type == AI)
                 )
             ).all()
         if rows:
