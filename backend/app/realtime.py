@@ -47,9 +47,12 @@ class RealtimeHub:
             targets = list(room.values())
         else:
             targets = [room[event.recipient]] if event.recipient in room else []
+        closing = event.payload.get("type") == "closed"  # e.g. the Session expired
         for ws in targets:
             try:
                 await ws.send_json(event.payload)
+                if closing:
+                    await ws.close(code=CLOSE_CODES.get(event.payload.get("reason"), 4400))
             except Exception:  # noqa: BLE001 - socket already closing; its handler cleans up
                 log.debug("Send failed on a closing socket")
 
