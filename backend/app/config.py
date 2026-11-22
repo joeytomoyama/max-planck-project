@@ -137,6 +137,7 @@ def load_config(path: Path | None = None, env: Mapping[str, str] = os.environ) -
     if not isinstance(data, dict):
         raise ConfigError(f"{path} must be a mapping of keys to values")
 
+    condition = _condition(data)  # first: a bad Condition is always the error reported
     mock_mode = _bool(data, "mock_mode", default=True)
     llm = LLMSettings.from_env(env)
     prompts = _prompts(data.get("prompts"), required=not mock_mode)
@@ -146,7 +147,7 @@ def load_config(path: Path | None = None, env: Mapping[str, str] = os.environ) -
             "(and LLM_API_KEY if the endpoint needs one), or set `mock_mode: true` in config.yml"
         )
     return Config(
-        condition=_condition(data),
+        condition=condition,
         timings=_timings(data.get("timings") or {}),
         number_of_rounds=NUMBER_OF_ROUNDS,
         mock_mode=mock_mode,
