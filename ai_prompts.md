@@ -3,7 +3,8 @@
 How AI Agents talk to the LLM when `mock_mode: false`. The prompts below are
 the defaults in `config.yml` (`prompts:` and `llm_parameters:`); edit them there,
 then restart the app. The development prompts (how this codebase was built with
-AI tools) are in the AI Usage Log, `.github/AI-USAGE-LOG.md`.
+AI tools, with the exact models and tools) are in the AI Usage Log,
+[`.github/AI-USAGE-LOG.md`](.github/AI-USAGE-LOG.md).
 
 ## Endpoint and model
 
@@ -44,8 +45,13 @@ exactly what a Human sees in the browser:
 - `{player_labels}`: all three (the ballot)
 - `{round}`: 1 or 2
 - `{tone}`: `ai_agents.tone` (default `casual`)
-- `{history}`: every chat message of the Session so far, oldest first, one
-  `Player X: text` per line; the AI Agent's own lines are marked `(you)`
+- `{history}`: every chat message of the Session so far (both Rounds), oldest
+  first, one `Player X: text` per line; the AI Agent's own lines read
+  `Player X (you): text`. Before anyone has written: `(no messages yet)`
+
+The request body is `model`, `messages`, `temperature`, `max_tokens` and, only if
+set, `reasoning_effort`. `Authorization: Bearer <LLM_API_KEY>` is sent only when
+`LLM_API_KEY` is set.
 
 ## Prompts
 
@@ -97,8 +103,9 @@ Answer with the Player Label only, e.g. "Player A".
   line is kept, a leading `Player X:` and surrounding quotes are stripped, and it
   is cut to 300 characters. The message then goes through the same path and
   sanitizing as a Human's message, so it looks identical on the wire.
-- **Blind Condition guard:** a message that mentions being an AI, a bot, a
-  language model, an assistant, ChatGPT or OpenAI is dropped (not sent).
+- **Blind Condition guard:** a message that gives the AI Agent away ("as an AI",
+  "I'm a bot", "language model", "chatbot", "AI assistant", "ChatGPT", "OpenAI",
+  ...; regex `_REVEALS_AI` in `backend/app/llm.py`) is dropped, not sent.
 - **Vote:** the first `Player X` (or a bare letter) in the answer is the Vote.
   An answer with no usable Player Label becomes a random Vote.
 - **Failures:** an HTTP error, timeout, malformed or empty answer skips that
