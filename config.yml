@@ -16,6 +16,11 @@ timings:
 # come only from the environment variables LLM_BASE_URL, LLM_MODEL and LLM_API_KEY.
 mock_mode: true
 
+# Mock mode only: a whole number makes AI Agents repeatable for demos. The same
+# seed, Player Labels and Human messages give the same AI Agent messages, timing
+# and Votes in every Session. Leave it out (or empty) for random behaviour.
+# mock_seed: 42
+
 # How AI Agents take part (mock mode and real LLM alike).
 ai_agents:
   reply_rate: 0.5               # chance of replying to each message from another Participant (0-1)

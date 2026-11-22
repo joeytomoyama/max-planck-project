@@ -52,7 +52,13 @@ def create_app(config: Config) -> FastAPI:
     engine = persistence.create_engine()
     session_engine = SessionEngine(engine, config)
     hub = RealtimeHub(session_engine)  # subscribes first: browsers hear each frame before AI Agents react
-    ai_agents = AIAgents(session_engine, engine, config.ai_agents, make_llm_client(config))
+    ai_agents = AIAgents(
+        session_engine,
+        engine,
+        config.ai_agents,
+        make_llm_client(config),
+        seed=config.mock_seed if config.mock_mode else None,
+    )
 
     app = FastAPI(title="Human-AI Group Decision Experiment", lifespan=lifespan)
     app.state.config = config

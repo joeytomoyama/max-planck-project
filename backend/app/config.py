@@ -103,6 +103,7 @@ class Config:
     timings: Timings
     number_of_rounds: int
     mock_mode: bool
+    mock_seed: int | None  # mock mode only: seeds mock answers and AI Agent timing; None = random
     reveal_identities_at_end: bool
     ai_agents: AIAgentSettings
     prompts: Prompts | None  # None only in mock mode without a `prompts:` section
@@ -151,6 +152,7 @@ def load_config(path: Path | None = None, env: Mapping[str, str] = os.environ) -
         timings=_timings(data.get("timings") or {}),
         number_of_rounds=NUMBER_OF_ROUNDS,
         mock_mode=mock_mode,
+        mock_seed=_mock_seed(data),
         reveal_identities_at_end=_bool(data, "reveal_identities_at_end", default=False),
         ai_agents=_ai_agents(data.get("ai_agents") or {}),
         prompts=prompts,
@@ -264,6 +266,13 @@ def _ai_agents(section: Any) -> AIAgentSettings:
         vote_delay_seconds=span("vote_delay_seconds", (1, 4)),
         tone=tone.strip(),
     )
+
+
+def _mock_seed(data: Mapping[str, Any]) -> int | None:
+    value = data.get("mock_seed")
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        raise ConfigError(f"Invalid `mock_seed: {value}` in config.yml. Must be a whole number or left out")
+    return value
 
 
 def _bool(data: Mapping[str, Any], key: str, default: bool) -> bool:
