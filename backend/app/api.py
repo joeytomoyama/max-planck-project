@@ -1,7 +1,7 @@
 """REST API for Sessions. Thin: every rule lives in the Session engine.
 
 Responses carry Room Codes, statuses and Player Labels only, never
-Participant types (Blind Condition).
+Participant types (Blind Condition). An expired Session is refused with 410.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from .config import Config
-from .session_engine import NotWaiting, SessionEngine, SessionNotFound
+from .session_engine import NotWaiting, SessionEngine, SessionExpired, SessionNotFound
 
 
 def sessions_router(engine: SessionEngine, config: Config) -> APIRouter:
@@ -27,6 +27,8 @@ def sessions_router(engine: SessionEngine, config: Config) -> APIRouter:
             return await engine.public_state(room_code)
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="Session not found") from None
+        except SessionExpired:
+            raise HTTPException(status_code=410, detail="Session expired") from None
 
     @router.post("/{room_code}/start")
     async def start_session(room_code: str):
@@ -35,6 +37,8 @@ def sessions_router(engine: SessionEngine, config: Config) -> APIRouter:
             await engine.start(room_code)
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="Session not found") from None
+        except SessionExpired:
+            raise HTTPException(status_code=410, detail="Session expired") from None
         except NotWaiting:
             raise HTTPException(status_code=409, detail="Session is not waiting") from None
         return await engine.public_state(room_code)
@@ -46,6 +50,8 @@ def sessions_router(engine: SessionEngine, config: Config) -> APIRouter:
             await engine.ensure_exists(room_code)
         except SessionNotFound:
             raise HTTPException(status_code=404, detail="Session not found") from None
+        except SessionExpired:
+            raise HTTPException(status_code=410, detail="Session expired") from None
         return config.public_settings()
 
     return router
