@@ -43,6 +43,10 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 | Blind Condition: no `human`/`ai`/`types` in any WebSocket frame or REST body (`/api/sessions`, `/api/sessions/{rc}`, `/config`) before the Result, none in the Result with reveal off | 2_humans_1_ai, 1_human_2_ai |
 | Real LLM via local Ollama (`qwen3.5:9b`) and a stub returning garbage / HTTP 500 / "As an AI…" | 1_human_2_ai |
 | README walkthrough: run on `APP_PORT`, create a Session, play it to the Result in mock mode; switch the Condition with `docker compose restart app` | 2_humans_1_ai, then 3_humans |
+| Votes cast within milliseconds of the Voting deadline (raw WebSockets, many Sessions): every `vote_recorded` Vote is in the Result and `rounds.vote_results`, later ones get `vote_closed`; a Human disconnecting just after the deadline gets an Abstention, just before it `missing` | 3_humans |
+| A Dropout's Player Label stays in `GET /api/sessions/{rc}`; a second `join` frame gets `error` `already_joined` | 2_humans_1_ai |
+| AI Agents (mock, `reply_rate: 1`, several quick Human messages) never post the same line twice in a row | 1_human_2_ai |
+| `mock_seed: 42`: Sessions with the same Player Labels and no Human chat give identical AI Agent messages and Result, also after an app restart | 1_human_2_ai |
 
 ## Manual checklist
 
@@ -53,6 +57,7 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
          ``CONFIG ERROR: Invalid `condition: 4_humans` in config.yml. Valid options: 3_humans | 2_humans_1_ai | 1_human_2_ai``.
 2. Delete the `condition:` line.
    - [ ] ``CONFIG ERROR: Missing `condition:` in config.yml. Valid options: ...``
+   - [ ] Same message with `mock_mode: false` and no LLM env vars (the Condition is checked first).
 3. Put the valid value back and restart.
    - [ ] The app starts and logs `Started with condition=...`.
 
