@@ -18,3 +18,25 @@ body {
   color: #555;
   font-size: 0.9rem;
 }
+
+.share {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.share p {
+  margin: 0;
+  width: 100%;
+}
+
+.share a {
+  word-break: break-all;
+}
+
+.error {
+  color: #b00020;
+}
+
