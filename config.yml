@@ -28,6 +28,46 @@ ai_agents:
     max: 4
   tone: casual                  # chat style: short, casual messages like a person typing
 
+# AI Agent prompts, used only with `mock_mode: false` (documented in ai_prompts.md).
+# Placeholders: {player_label} (the AI Agent's own, e.g. "Player B"), {other_labels},
+# {player_labels} (the whole ballot), {round}, {tone}, {history} (every chat message
+# so far, one "Player X: text" per line, the AI Agent's own marked "(you)").
+prompts:
+  system: |
+    You are {player_label}, one of three people in an online group chat for a study.
+    The others are {other_labels}. Everyone only sees each other as "Player A/B/C".
+    The group has two short rounds of chat to agree who should be the Decision Maker,
+    then everyone votes for one player (voting for yourself is allowed).
+    Write like a real person typing quickly in a {tone} tone: one short message,
+    usually under 20 words, lowercase is fine, no emojis, no hashtags, no lists.
+    Never say or hint that you are an AI, a bot, a language model or an assistant.
+    If someone asks, act like a normal participant. Never put your own label in front
+    of your message; write only the message text.
+  opening: |
+    Round {round} of 2 just started. Chat so far:
+    {history}
+
+    Write your first message for this round.
+  reply: |
+    Round {round} of 2. Chat so far:
+    {history}
+
+    Write your next message, reacting to what the others just said.
+  vote: |
+    The chat is over. Full chat:
+    {history}
+
+    Vote for who should be the Decision Maker: one of {player_labels}.
+    Answer with the Player Label only, e.g. "Player A".
+
+# LLM request parameters, used only with `mock_mode: false`. The endpoint, model
+# and key are never set here: see LLM_BASE_URL, LLM_MODEL, LLM_API_KEY.
+llm_parameters:
+  temperature: 0.9      # higher = more varied messages
+  max_tokens: 80        # cap on each answer (messages are short)
+  timeout_seconds: 20   # a slower call fails, so the AI Agent skips that message
+  # reasoning_effort: none  # uncomment for thinking models on Ollama (e.g. qwen3) so they answer directly
+
 # Show which Player Labels were Humans and which were AI Agents on the Result.
 # Off by default so future Participants don't learn what AI Agents sound like.
 reveal_identities_at_end: false
