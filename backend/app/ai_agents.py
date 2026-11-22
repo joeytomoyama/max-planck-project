@@ -13,8 +13,12 @@ message from another Participant with probability `reply_rate`, waits a random
 `message_delay_seconds` before each message, and sends at most
 `max_messages_per_phase`. In each Voting Phase it votes once after
 `vote_delay_seconds` (capped to fit the Phase). Text and Votes come from an
-`LLMClient`; answers are cached per (AI Agent, what it sees). A failing LLM call
-skips the message; an unusable vote answer becomes a random Vote.
+`LLMClient`; answers are cached per (AI Agent, what it sees, its message
+ordinal in the Phase), and a message identical to the AI Agent's previous one
+is never posted. A failing LLM call skips the message; an unusable vote answer
+becomes a random Vote. With `mock_seed` set (mock mode), each runner's random
+choices (delays, whether to reply, fallback Votes) come from a generator seeded
+by the seed and its Player Label, so demos repeat.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ class AIAgentRunner:
         self._ballot: tuple[str, ...] = ()
         self._history: list[ChatLine] = []
         self._used = 0  # messages sent or scheduled in this Discussion Phase
+        self._last_text: str | None = None  # this AI Agent's previous message in the Session
         self._tasks: set[asyncio.Task] = set()
         self._cache: dict[AgentView, str] = {}
 
@@ -96,7 +101,7 @@ class AIAgentRunner:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def _view(self, purpose: str) -> AgentView:
+    def _view(self, purpose: str, message_number: int = 0) -> AgentView:
         return AgentView(
             player_label=self._label,
             round=self._round,
@@ -104,6 +109,7 @@ class AIAgentRunner:
             history=tuple(self._history),
             purpose=purpose,
             tone=self._settings.tone,
+            message_number=message_number,
         )
 
     # --- Chat ------------------------------------------------------------
@@ -112,11 +118,11 @@ class AIAgentRunner:
         if self._used >= self._settings.max_messages_per_phase:
             return
         self._used += 1
-        self._spawn(self._send_message(purpose))
+        self._spawn(self._send_message(purpose, self._used))
 
-    async def _send_message(self, purpose: str) -> None:
+    async def _send_message(self, purpose: str, message_number: int) -> None:
         await asyncio.sleep(self._rng.uniform(*self._settings.message_delay_seconds))
-        view = self._view(purpose)  # the chat as it stands when the AI Agent "types"
+        view = self._view(purpose, message_number)  # the chat as it stands when the AI Agent "types"
         try:
             text = self._cache.get(view)
             if text is None:
@@ -125,6 +131,10 @@ class AIAgentRunner:
         except Exception:  # noqa: BLE001 - an LLM error skips this message, never the Session
             log.warning("AI Agent %s in %s: LLM call failed, message skipped", self._label, self._me.room_code, exc_info=True)
             return
+        if text.strip() == self._last_text:
+            log.info("AI Agent %s in %s: same text as its previous message, skipped", self._label, self._me.room_code)
+            return
+        self._last_text = text.strip()
         await self._engine.chat(self._me, text)
 
     # --- Voting ----------------------------------------------------------
@@ -160,11 +170,19 @@ class AIAgentRunner:
 class AIAgents:
     """Creates and feeds the runners of every active Session's AI Agents."""
 
-    def __init__(self, engine: SessionEngine, db: AsyncEngine, settings: AIAgentSettings, client: LLMClient):
+    def __init__(
+        self,
+        engine: SessionEngine,
+        db: AsyncEngine,
+        settings: AIAgentSettings,
+        client: LLMClient,
+        seed: int | None = None,
+    ):
         self._engine = engine
         self._db = db
         self._settings = settings
         self._client = client
+        self._seed = seed  # `mock_seed`; None = random
         self._rooms: dict[str, list[AIAgentRunner]] = {}  # room_code -> runners
         engine.subscribe(self._on_event)
 
@@ -198,6 +216,8 @@ class AIAgents:
                 JoinedParticipant(id=row.id, session_id=row.session_id, room_code=room_code, player_label=row.player_label),
                 self._settings,
                 self._client,
+                # Seeded by Player Label, not Room Code, so a demo repeats in a new Session.
+                random.Random(f"{self._seed}|{row.player_label}") if self._seed is not None else None,
             )
             for row in rows
         ]
