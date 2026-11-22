@@ -1,8 +1,8 @@
 """FastAPI app factory: wires config, persistence, the API and the React SPA.
 
-`create_app(config)` is the composition root. Later modules (session engine,
-realtime hub, AI Agent runner) are created in `lifespan` and their routers
-included here; keep this file thin.
+`create_app(config)` is the composition root: it builds the Session engine and
+the realtime hub (hub subscribes to engine events) and includes their routers.
+Later modules (AI Agent runner) are wired here too; keep this file thin.
 """
 
 from __future__ import annotations
@@ -17,7 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import persistence
+from .api import sessions_router
 from .config import Config
+from .realtime import RealtimeHub, ws_router
+from .session_engine import SessionEngine
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +33,7 @@ def static_dir() -> Path:
 def create_app(config: Config) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        engine = persistence.create_engine()
         await persistence.create_schema(engine)
-        app.state.engine = engine
         log.info(
             "Started with condition=%s mock_mode=%s reveal_identities_at_end=%s",
             config.condition.name,
@@ -42,10 +43,19 @@ def create_app(config: Config) -> FastAPI:
         yield
         await engine.dispose()
 
+    # The async engine connects lazily, so it is safe to build before the lifespan runs.
+    engine = persistence.create_engine()
+    session_engine = SessionEngine(engine, config)
+    hub = RealtimeHub(session_engine)
+
     app = FastAPI(title="Human-AI Group Decision Experiment", lifespan=lifespan)
     app.state.config = config
+    app.state.engine = engine
+    app.state.session_engine = session_engine
 
     app.include_router(_health_router(), prefix="/api")
+    app.include_router(sessions_router(session_engine), prefix="/api")
+    app.include_router(ws_router(hub))  # must come before the SPA catch-all
     _mount_spa(app, static_dir())
     return app
 
