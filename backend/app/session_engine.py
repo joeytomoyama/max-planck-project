@@ -16,6 +16,13 @@ each Round is a Discussion Phase then a Voting Phase. Every Phase goes through
 `_enter_phase` (sets the server deadline, emits a `phase` frame) and
 `_wait_phase` (sleeps until the deadline, or until `_Run.phase_over` is set to
 end it early, e.g. once everyone has voted).
+
+Voting: `vote()` is the one path for every Participant's Vote (Humans via the
+hub, AI Agents via their runner). The Voting Phase ends early once every
+Participant in `_Run.present` (connected Humans + AI Agents) has voted. At its
+end, everyone who did not vote is written as an Abstention, or as `missing`
+if they are no longer present (a Dropout). After the last Round, the pure
+`vote_tally.tally` gives the Result.
 """
 
 from __future__ import annotations
@@ -30,10 +37,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .config import CONDITIONS, Config
-from .persistence import messages, participants, rounds, sessions
+from .persistence import messages, participants, rounds, sessions, votes
+from .vote_tally import ABSTENTION, MISSING, VOTE, Ballot, Result, round_summary, tally
 
 log = logging.getLogger(__name__)
 
@@ -106,8 +115,11 @@ class _Run:
     round: int | None = None
     phase: str | None = None
     deadline: datetime | None = None
-    phase_over: asyncio.Event = field(default_factory=asyncio.Event)  # set to end the Phase early
+    phase_over: asyncio.Event = field(default_factory=asyncio.Event)  # set = Phase over (early or at deadline)
     task: asyncio.Task | None = None
+    labels: dict[int, str] = field(default_factory=dict)  # participant id -> Player Label letter
+    present: set[int] = field(default_factory=set)  # ids still taking part: connected Humans + AI Agents
+    voted: set[int] = field(default_factory=set)  # ids that voted in the current Voting Phase
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁠-⁩﻿]")
@@ -260,7 +272,13 @@ class SessionEngine:
                     await conn.execute(select(sessions.c.status).where(sessions.c.id == participant.session_id))
                 ).scalar_one_or_none()
                 if status != "waiting":
-                    return  # Dropouts during an active Session: ticket #16
+                    # Dropouts during an active Session (marking, `incomplete`): ticket #16.
+                    # Already here: they stop counting for the early end of voting.
+                    run = self._runs.get(participant.room_code)
+                    if run is not None:
+                        run.present.discard(participant.id)
+                        self._end_voting_if_all_voted(run)
+                    return
                 await conn.execute(delete(participants).where(participants.c.id == participant.id))
                 await conn.execute(
                     update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=func.now())
@@ -317,7 +335,16 @@ class SessionEngine:
                     .where(sessions.c.id == session.id)
                     .values(status="active", last_activity=func.now())
                 )
+                everyone = (
+                    await conn.execute(
+                        select(participants.c.id, participants.c.player_label).where(
+                            participants.c.session_id == session.id
+                        )
+                    )
+                ).all()
             run = _Run(session_id=session.id)
+            run.labels = {row.id: row.player_label for row in everyone}
+            run.present = set(run.labels)
             self._runs[room_code] = run
             run.task = asyncio.create_task(self._run_session(room_code, run), name=f"session-{room_code}")
         log.info("Session %s started", room_code)
@@ -352,28 +379,84 @@ class SessionEngine:
             )
 
     async def _voting_phase(self, room_code: str, run: _Run, round_number: int) -> None:
-        # Ticket #13: accept Votes, end early once every connected Participant
-        # has voted (set run.phase_over), record Abstentions at the deadline.
+        run.voted = set()
         await self._enter_phase(room_code, run, round_number, VOTING, self._config.timings.voting_seconds)
+        self._end_voting_if_all_voted(run)  # e.g. nobody is present any more
         await self._wait_phase(run)
+        run.phase_over.set()  # closes the ballot box: `vote()` refuses from here on
+        ended = _now()
+        # Whoever did not vote: an Abstention if still present, else missing (Dropout).
+        # ON CONFLICT DO NOTHING keeps a row already written (e.g. by #16 at dropout).
+        absent = [
+            {
+                "session_id": run.session_id,
+                "round_number": round_number,
+                "participant_id": pid,
+                "kind": ABSTENTION if pid in run.present else MISSING,
+                "cast_at": ended,
+            }
+            for pid in run.labels
+            if pid not in run.voted
+        ]
         async with self._db.begin() as conn:
+            if absent:
+                await conn.execute(pg_insert(votes).values(absent).on_conflict_do_nothing())
+            ballots = await self._ballots(conn, run, round_number)
             await conn.execute(
                 update(rounds)
                 .where(rounds.c.session_id == run.session_id, rounds.c.round_number == round_number)
-                .values(voting_end=_now())
+                .values(voting_end=ended, vote_results=round_summary(sorted(run.labels.values()), ballots))
             )
+        log.info(
+            "Session %s: Round %d voting closed (%d of %d voted)", room_code, round_number, len(run.voted), len(run.labels)
+        )
+
+    async def _ballots(self, conn, run: _Run, round_number: int | None = None) -> list[Ballot]:
+        """Stored Votes of this Session (one Round, or all Rounds) as tally input."""
+        query = select(votes.c.round_number, votes.c.participant_id, votes.c.kind, votes.c.target_participant).where(
+            votes.c.session_id == run.session_id
+        )
+        if round_number is not None:
+            query = query.where(votes.c.round_number == round_number)
+        return [
+            Ballot(row.round_number, run.labels[row.participant_id], row.kind, run.labels.get(row.target_participant))
+            for row in (await conn.execute(query)).all()
+        ]
 
     async def _finish(self, room_code: str, run: _Run) -> None:
-        # Ticket #13: compute the Result (Decision Maker) and emit a `result` frame.
+        """Compute the Result from both Rounds, store it, mark the Session
+        completed and send everyone the `result` frame."""
         async with self._db.begin() as conn:
+            result = tally(sorted(run.labels.values()), await self._ballots(conn, run))
             await conn.execute(
                 update(sessions)
                 .where(sessions.c.id == run.session_id)
-                .values(status="completed", completed_at=func.now(), last_activity=func.now())
+                .values(
+                    status="completed",
+                    completed_at=func.now(),
+                    last_activity=func.now(),
+                    decision_maker=result.decision_maker,
+                    decided_by_tiebreak=result.decided_by_tiebreak,
+                )
             )
         run.round, run.phase, run.deadline = None, None, None
-        await self._emit(Event(room_code, {"type": "closed", "reason": "completed"}))
-        log.info("Session %s completed", room_code)
+        await self._emit(Event(room_code, self._result_frame(result)))
+        log.info(
+            "Session %s completed: Decision Maker Player %s%s",
+            room_code,
+            result.decision_maker,
+            " (tie-break)" if result.decided_by_tiebreak else "",
+        )
+
+    @staticmethod
+    def _result_frame(result: Result) -> dict[str, Any]:
+        # Player Labels and counts only. The optional Human/AI reveal (#14) adds
+        # a `types` field here when `reveal_identities_at_end` is on.
+        return {
+            "type": "result",
+            "counts": {f"Player {label}": n for label, n in sorted(result.counts.items())},
+            "decision_maker": f"Player {result.decision_maker}",
+        }
 
     async def _enter_phase(self, room_code: str, run: _Run, round_number: int, phase: str, seconds: float) -> datetime:
         start = _now()
@@ -401,6 +484,7 @@ class SessionEngine:
             "phase": run.phase,
             "deadline": run.deadline.isoformat(),
             "server_time": _now().isoformat(),
+            "player_labels": [f"Player {label}" for label in sorted(run.labels.values())],  # the ballot
         }
 
     # --- Chat ------------------------------------------------------------
@@ -448,6 +532,57 @@ class SessionEngine:
                 },
             )
         )
+
+    # --- Voting ----------------------------------------------------------
+
+    async def vote(self, participant: JoinedParticipant, target: Any) -> None:
+        """Record one Vote for any Player Label (self included), once per Round.
+
+        The one path for Humans and AI Agents alike. Only the voter hears back
+        (`vote_recorded`); nobody learns counts or choices before the Result.
+        Rejections: `vote_closed`, `bad_vote` (unknown label), `already_voted`.
+        """
+        run = self._runs.get(participant.room_code)
+        if run is None or run.phase != VOTING or run.phase_over.is_set() or participant.id not in run.present:
+            await self._reject(participant, "vote_closed")
+            return
+        letter = target.removeprefix("Player ").strip() if isinstance(target, str) else None
+        target_id = next((pid for pid, label in run.labels.items() if label == letter), None)
+        if target_id is None:
+            await self._reject(participant, "bad_vote")
+            return
+        if participant.id in run.voted:
+            await self._reject(participant, "already_voted")
+            return
+        run.voted.add(participant.id)  # claimed before any await: no double Vote under races
+        round_number, cast_at = run.round, _now()
+        async with self._db.begin() as conn:
+            await conn.execute(
+                insert(votes).values(
+                    session_id=participant.session_id,
+                    round_number=round_number,
+                    participant_id=participant.id,
+                    target_participant=target_id,
+                    kind=VOTE,
+                    cast_at=cast_at,
+                )
+            )
+            await conn.execute(
+                update(participants).where(participants.c.id == participant.id).values(last_activity=cast_at)
+            )
+            await conn.execute(
+                update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=cast_at)
+            )
+        await self._emit(
+            Event(participant.room_code, {"type": "vote_recorded", "round": round_number}, recipient=participant.id)
+        )
+        self._end_voting_if_all_voted(run)
+
+    @staticmethod
+    def _end_voting_if_all_voted(run: _Run) -> None:
+        """End the Voting Phase early once every present Participant has voted."""
+        if run.phase == VOTING and run.present <= run.voted:
+            run.phase_over.set()
 
     async def _reject(self, participant: JoinedParticipant, reason: str) -> None:
         await self._emit(Event(participant.room_code, {"type": "error", "reason": reason}, recipient=participant.id))
