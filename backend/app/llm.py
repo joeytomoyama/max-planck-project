@@ -9,19 +9,23 @@ the chat history) and gets back text:
   it and falls back to a random Vote if it can't.
 
 Either method may raise; the runner then skips that message (or votes at
-random). `MockLLMClient` needs no network and no env vars. The real
-OpenAI-compatible client (ticket #15) implements the same two methods and is
-picked in `make_llm_client`.
+random). `MockLLMClient` needs no network and no env vars.
+`OpenAICompatibleClient` fills the `prompts:` templates from config.yml and
+calls any OpenAI-compatible `/chat/completions` endpoint set by the LLM_* env
+vars. `make_llm_client` picks one based on `mock_mode`.
 """
 
 from __future__ import annotations
 
 import logging
 import random
+import re
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
-from .config import Config
+import httpx
+
+from .config import Config, LLMParameters, LLMSettings, Prompts
 
 log = logging.getLogger(__name__)
 
@@ -51,10 +55,99 @@ class LLMClient(Protocol):
 
 
 def make_llm_client(config: Config) -> LLMClient:
-    """Mock in mock mode. The real OpenAI-compatible client arrives with #15."""
-    if not config.mock_mode:
-        log.warning("mock_mode is off but no real LLM client exists yet; AI Agents use the mock")
-    return MockLLMClient()
+    """Mock in mock mode, otherwise the OpenAI-compatible client (env vars checked by the config loader)."""
+    if config.mock_mode:
+        return MockLLMClient()
+    log.info("AI Agents use the LLM %s at %s", config.llm.model, config.llm.base_url)
+    return OpenAICompatibleClient(config.llm, config.prompts, config.llm_parameters)
+
+
+# --- OpenAI-compatible -------------------------------------------------------
+
+
+class LLMError(Exception):
+    """The LLM call failed or gave an unusable answer. The runner skips the message."""
+
+
+# A message that gives the game away is dropped rather than sent (Blind Condition).
+_REVEALS_AI = re.compile(
+    r"\b(as an ai|an ai\b|i'?m an? (ai|bot|language model)|i am an? (ai|bot|language model)|language model|"
+    r"chatbot|ai assistant|openai|chatgpt)",
+    re.IGNORECASE,
+)
+_THINK = re.compile(r"<think>.*?(</think>|$)", re.IGNORECASE | re.DOTALL)
+_OWN_PREFIX = re.compile(r"^\s*\**player\s*[a-z]\**\s*[:\-]\s*", re.IGNORECASE)
+MAX_MESSAGE_CHARS = 300
+
+
+class OpenAICompatibleClient:
+    """Calls `POST {LLM_BASE_URL}/chat/completions` (OpenAI, Ollama, vLLM, LM Studio, ...).
+
+    One system message (`prompts.system`) and one user message (the chat history
+    plus `prompts.opening` / `reply` / `vote`). Any HTTP error, timeout or empty
+    answer raises `LLMError`.
+    """
+
+    def __init__(self, llm: LLMSettings, prompts: Prompts, params: LLMParameters):
+        self._url = llm.base_url.rstrip("/") + "/chat/completions"
+        self._model = llm.model
+        self._headers = {"Authorization": f"Bearer {llm.api_key}"} if llm.api_key else {}
+        self._prompts = prompts
+        self._params = params
+
+    async def write_message(self, view: AgentView) -> str:
+        template = self._prompts.opening if view.purpose == "opening" else self._prompts.reply
+        text = await self._complete(view, template)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        text = _OWN_PREFIX.sub("", lines[0] if lines else "").strip().strip('"').strip()
+        if not text:
+            raise LLMError("empty message")
+        if _REVEALS_AI.search(text):
+            raise LLMError(f"message would reveal an AI Agent: {text!r}")
+        return text[:MAX_MESSAGE_CHARS]
+
+    async def choose_vote(self, view: AgentView) -> str:
+        return await self._complete(view, self._prompts.vote)
+
+    async def _complete(self, view: AgentView, template: str) -> str:
+        values = _placeholders(view)
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": self._prompts.system.format(**values)},
+                {"role": "user", "content": template.format(**values)},
+            ],
+            "temperature": self._params.temperature,
+            "max_tokens": self._params.max_tokens,
+        }
+        if self._params.reasoning_effort:
+            body["reasoning_effort"] = self._params.reasoning_effort
+        try:
+            async with httpx.AsyncClient(timeout=self._params.timeout_seconds) as http:
+                response = await http.post(self._url, json=body, headers=self._headers)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"LLM call failed: {exc!r}") from exc
+        content = _THINK.sub("", content or "").strip()
+        if not content:
+            raise LLMError("empty answer")
+        return content
+
+
+def _placeholders(view: AgentView) -> dict[str, str]:
+    history = "\n".join(
+        f"{line.player_label}{' (you)' if line.player_label == view.player_label else ''}: {line.text}"
+        for line in view.history
+    )
+    return {
+        "player_label": view.player_label,
+        "other_labels": ", ".join(label for label in view.player_labels if label != view.player_label),
+        "player_labels": ", ".join(view.player_labels),
+        "round": str(view.round),
+        "tone": view.tone,
+        "history": history or "(no messages yet)",
+    }
 
 
 # --- Mock ------------------------------------------------------------------

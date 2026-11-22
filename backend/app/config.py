@@ -47,13 +47,37 @@ class Timings:
 
 @dataclass(frozen=True)
 class AIAgentSettings:
-    """How AI Agents chat and vote (`ai_agents:` in config.yml). Prompts: #15."""
+    """How AI Agents chat and vote (`ai_agents:` in config.yml). Prompts: `Prompts`."""
 
     reply_rate: float  # chance of replying to each message from another Participant
     message_delay_seconds: tuple[float, float]  # (min, max) wait before each message
     max_messages_per_phase: int  # cap per Discussion Phase, opening message included
     vote_delay_seconds: tuple[float, float]  # (min, max) wait before voting
     tone: str  # chat style, e.g. "casual"
+
+
+# Placeholders AI Agent prompt templates may use (filled by the real LLM client).
+PROMPT_PLACEHOLDERS = ("player_label", "other_labels", "player_labels", "round", "tone", "history")
+
+
+@dataclass(frozen=True)
+class Prompts:
+    """AI Agent prompt templates (`prompts:` in config.yml), used only with mock mode off."""
+
+    system: str  # who the AI Agent is and how it writes
+    opening: str  # first message of a Discussion Phase
+    reply: str  # reply to the latest messages
+    vote: str  # pick one Player Label
+
+
+@dataclass(frozen=True)
+class LLMParameters:
+    """Request parameters for the LLM (`llm_parameters:` in config.yml). Never the key or URL."""
+
+    temperature: float
+    max_tokens: int
+    timeout_seconds: float
+    reasoning_effort: str | None  # e.g. "none" to turn off thinking in reasoning models; None = not sent
 
 
 @dataclass(frozen=True)
@@ -81,6 +105,8 @@ class Config:
     mock_mode: bool
     reveal_identities_at_end: bool
     ai_agents: AIAgentSettings
+    prompts: Prompts | None  # None only in mock mode without a `prompts:` section
+    llm_parameters: LLMParameters
     llm: LLMSettings
     raw: Mapping[str, Any]  # the parsed file, for sections later modules own (e.g. AI Agent settings)
 
@@ -111,15 +137,72 @@ def load_config(path: Path | None = None, env: Mapping[str, str] = os.environ) -
     if not isinstance(data, dict):
         raise ConfigError(f"{path} must be a mapping of keys to values")
 
+    mock_mode = _bool(data, "mock_mode", default=True)
+    llm = LLMSettings.from_env(env)
+    prompts = _prompts(data.get("prompts"), required=not mock_mode)
+    if not mock_mode and not (llm.base_url and llm.model):
+        raise ConfigError(
+            "`mock_mode: false` needs an LLM: set the environment variables LLM_BASE_URL and LLM_MODEL "
+            "(and LLM_API_KEY if the endpoint needs one), or set `mock_mode: true` in config.yml"
+        )
     return Config(
         condition=_condition(data),
         timings=_timings(data.get("timings") or {}),
         number_of_rounds=NUMBER_OF_ROUNDS,
-        mock_mode=_bool(data, "mock_mode", default=True),
+        mock_mode=mock_mode,
         reveal_identities_at_end=_bool(data, "reveal_identities_at_end", default=False),
         ai_agents=_ai_agents(data.get("ai_agents") or {}),
-        llm=LLMSettings.from_env(env),
+        prompts=prompts,
+        llm_parameters=_llm_parameters(data.get("llm_parameters") or {}),
+        llm=llm,
         raw=data,
+    )
+
+
+def _prompts(section: Any, required: bool) -> Prompts | None:
+    if section is None and not required:
+        return None
+    if not isinstance(section, dict):
+        raise ConfigError("`prompts:` in config.yml must be a mapping with system, opening, reply and vote")
+    values = {}
+    dummy = {name: "x" for name in PROMPT_PLACEHOLDERS}
+    for key in ("system", "opening", "reply", "vote"):
+        value = section.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"Missing or empty `prompts.{key}` in config.yml")
+        try:
+            value.format(**dummy)
+        except (KeyError, IndexError, ValueError) as exc:
+            allowed = ", ".join("{" + name + "}" for name in PROMPT_PLACEHOLDERS)
+            raise ConfigError(f"Bad placeholder {exc} in `prompts.{key}` in config.yml. Allowed: {allowed}") from None
+        values[key] = value.strip()
+    return Prompts(**values)
+
+
+def _llm_parameters(section: Any) -> LLMParameters:
+    if not isinstance(section, dict):
+        raise ConfigError("`llm_parameters:` in config.yml must be a mapping")
+
+    def positive(key: str, default: float) -> float:
+        value = section.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"Invalid `llm_parameters.{key}: {value}` in config.yml. Must be a positive number")
+        return value
+
+    temperature = section.get("temperature", 0.9)
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2:
+        raise ConfigError(f"Invalid `llm_parameters.temperature: {temperature}` in config.yml. Must be between 0 and 2")
+    max_tokens = positive("max_tokens", 80)
+    if int(max_tokens) != max_tokens:
+        raise ConfigError(f"Invalid `llm_parameters.max_tokens: {max_tokens}` in config.yml. Must be a whole number")
+    effort = section.get("reasoning_effort")
+    if effort is not None and (not isinstance(effort, str) or not effort.strip()):
+        raise ConfigError(f"Invalid `llm_parameters.reasoning_effort: {effort}` in config.yml. Must be text or left out")
+    return LLMParameters(
+        temperature=temperature,
+        max_tokens=int(max_tokens),
+        timeout_seconds=positive("timeout_seconds", 20),
+        reasoning_effort=effort.strip() if effort else None,
     )
 
 
