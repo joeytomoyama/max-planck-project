@@ -17,6 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import persistence
+from .ai_agents import AIAgents
+from .llm import make_llm_client
 from .api import sessions_router
 from .config import Config
 from .realtime import RealtimeHub, ws_router
@@ -41,13 +43,15 @@ def create_app(config: Config) -> FastAPI:
             config.reveal_identities_at_end,
         )
         yield
+        ai_agents.shutdown()
         await session_engine.shutdown()
         await engine.dispose()
 
     # The async engine connects lazily, so it is safe to build before the lifespan runs.
     engine = persistence.create_engine()
     session_engine = SessionEngine(engine, config)
-    hub = RealtimeHub(session_engine)
+    hub = RealtimeHub(session_engine)  # subscribes first: browsers hear each frame before AI Agents react
+    ai_agents = AIAgents(session_engine, engine, config.ai_agents, make_llm_client(config))
 
     app = FastAPI(title="Human-AI Group Decision Experiment", lifespan=lifespan)
     app.state.config = config

@@ -16,6 +16,18 @@ timings:
 # come only from the environment variables LLM_BASE_URL, LLM_MODEL and LLM_API_KEY.
 mock_mode: true
 
+# How AI Agents take part (mock mode and real LLM alike).
+ai_agents:
+  reply_rate: 0.5               # chance of replying to each message from another Participant (0-1)
+  message_delay_seconds:        # wait before each message, picked at random in this range
+    min: 3
+    max: 10
+  max_messages_per_phase: 4     # messages per AI Agent per Discussion Phase, opening message included
+  vote_delay_seconds:           # wait before voting, picked at random (capped by the Voting Phase)
+    min: 1
+    max: 4
+  tone: casual                  # chat style: short, casual messages like a person typing
+
 # Show which Player Labels were Humans and which were AI Agents on the Result.
 # Off by default so future Participants don't learn what AI Agents sound like.
 reveal_identities_at_end: false
