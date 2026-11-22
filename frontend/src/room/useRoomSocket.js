@@ -2,12 +2,14 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 
 // One WebSocket per room page. All Session state arrives as server frames and
 // is folded into `state` by the reducer; the page never polls. `send` writes a
-// client frame (e.g. `{type: "chat", text}`). Later tickets add cases for
-// vote_recorded / result frames.
+// client frame (e.g. `{type: "chat", text}` or `{type: "vote", target}`).
 
 const initialState = {
-  view: "connecting", // connecting | waiting | discussion | voting | error
+  view: "connecting", // connecting | waiting | discussion | voting | result | error
   playerLabel: null,
+  playerLabels: [], // every Player Label in the Session (the ballot)
+  votedRound: null, // Round whose Vote the server acknowledged
+  result: null, // {counts: {"Player X": n}, decision_maker}
   filled: 0,
   total: 0,
   round: null,
@@ -33,6 +35,7 @@ function reducer(state, action) {
         view: action.phase,
         round: action.round,
         deadline: Date.parse(action.deadline) + offset,
+        playerLabels: action.player_labels || state.playerLabels,
         messages: newRound ? [] : state.messages,
         notice: null,
       };
@@ -42,6 +45,10 @@ function reducer(state, action) {
         ...state,
         messages: [...state.messages, { player_label: action.player_label, text: action.text, sent_at: action.sent_at }],
       };
+    case "vote_recorded":
+      return { ...state, votedRound: action.round };
+    case "result":
+      return { ...state, view: "result", result: { counts: action.counts, decision_maker: action.decision_maker } };
     case "closed":
       return { ...state, view: "error", error: action.reason };
     case "error":
@@ -49,7 +56,8 @@ function reducer(state, action) {
       // a rejected frame (empty chat message, chat closed, ...) and not fatal.
       return state.playerLabel ? { ...state, notice: action.reason } : { ...state, view: "error", error: action.reason };
     case "socket_closed":
-      return state.view === "error" ? state : { ...state, view: "error", error: action.reason };
+      // After the Result the server may close the socket; keep showing the Result.
+      return state.view === "error" || state.view === "result" ? state : { ...state, view: "error", error: action.reason };
     default:
       return state;
   }

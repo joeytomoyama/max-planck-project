@@ -3,6 +3,7 @@ import useRoomSocket from "../room/useRoomSocket.js";
 import WaitingRoomView from "../room/WaitingRoomView.jsx";
 import DiscussionView from "../room/DiscussionView.jsx";
 import VotingView from "../room/VotingView.jsx";
+import ResultView from "../room/ResultView.jsx";
 import ErrorView from "../room/ErrorView.jsx";
 
 // Participant page for one Session. Renders the view the server state calls
@@ -26,7 +27,19 @@ export default function RoomPage() {
         />
       );
     case "voting":
-      return <VotingView playerLabel={state.playerLabel} round={state.round} deadline={state.deadline} />;
+      return (
+        <VotingView
+          playerLabel={state.playerLabel}
+          playerLabels={state.playerLabels}
+          round={state.round}
+          deadline={state.deadline}
+          votedRound={state.votedRound}
+          notice={state.notice}
+          send={send}
+        />
+      );
+    case "result":
+      return <ResultView playerLabel={state.playerLabel} result={state.result} />;
     case "error":
       return <ErrorView reason={state.error} />;
     default:

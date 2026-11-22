@@ -5,9 +5,10 @@ Session engine and turns engine `Event`s into JSON frames. It holds no game
 state of its own. Frames only ever carry Player Labels (Blind Condition).
 
 Protocol (JSON, every frame has a `type`):
-  client -> server: join, chat {text}   (later: vote)
+  client -> server: join, chat {text}, vote {target: "Player X"}
   server -> client: joined, waiting, phase {round, phase, deadline, server_time},
-                    chat {player_label, text, sent_at}, closed, error   (later: vote_recorded, result)
+                    chat {player_label, text, sent_at}, vote_recorded {round} (voter only),
+                    result {counts: {"Player X": n}, decision_maker}, closed, error
 A refused join gets an `error` frame with a `reason`, then a close with a
 4xxx code (see CLOSE_CODES), so a client can show the right error view.
 """
@@ -89,7 +90,9 @@ class RealtimeHub:
             kind = frame.get("type") if isinstance(frame, dict) else None
             if kind == "chat":
                 await self._engine.chat(participant, frame.get("text"))
-            else:  # `vote` is routed to the engine in ticket #13
+            elif kind == "vote":
+                await self._engine.vote(participant, frame.get("target"))
+            else:
                 await ws.send_json({"type": "error", "reason": "unsupported", "detail": str(kind)[:32]})
 
 
