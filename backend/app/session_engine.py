@@ -265,26 +265,64 @@ class SessionEngine:
             pass
 
     async def disconnected(self, participant: JoinedParticipant) -> None:
-        """A Human's socket closed. Before the start this frees their slot."""
+        """A Human's socket closed. Before the start this frees their slot; during
+        an active Session it makes them a Dropout. Afterwards it changes nothing."""
         async with self._locks.get(participant.room_code):
             async with self._db.begin() as conn:
                 status = (
                     await conn.execute(select(sessions.c.status).where(sessions.c.id == participant.session_id))
                 ).scalar_one_or_none()
-                if status != "waiting":
-                    # Dropouts during an active Session (marking, `incomplete`): ticket #16.
-                    # Already here: they stop counting for the early end of voting.
-                    run = self._runs.get(participant.room_code)
-                    if run is not None:
-                        run.present.discard(participant.id)
-                        self._end_voting_if_all_voted(run)
+                if status == "active":
+                    await self._drop_out(conn, participant)
                     return
+                if status != "waiting":
+                    return  # completed or expired: nothing left to take part in
                 await conn.execute(delete(participants).where(participants.c.id == participant.id))
                 await conn.execute(
                     update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=func.now())
                 )
         log.info("Player %s left Session %s before the start", participant.player_label, participant.room_code)
         await self._emit_waiting(participant.room_code, participant.session_id)
+
+    async def _drop_out(self, conn, participant: JoinedParticipant) -> None:
+        """Mark a Dropout: `dropped_out_at`, Session `incomplete`, and every Vote
+        they can no longer cast written as `missing` (never an Abstention).
+
+        They leave `run.present`, so `vote()` refuses them and the early end of
+        voting only waits for those still connected. They cannot rejoin: joins
+        are only accepted while the Session is waiting. Nobody is told (no
+        presence signals, Blind Condition); the Session just carries on.
+        """
+        now = _now()
+        await conn.execute(
+            update(participants).where(participants.c.id == participant.id).values(dropped_out_at=now)
+        )
+        await conn.execute(
+            update(sessions).where(sessions.c.id == participant.session_id).values(incomplete=True, last_activity=now)
+        )
+        run = self._runs.get(participant.room_code)
+        if run is None:
+            return
+        run.present.discard(participant.id)
+        # The current Round only if they have not voted in it yet (`run.voted` is
+        # claimed synchronously in `vote()`, so this cannot race a Vote insert).
+        first = run.round or 1
+        if run.phase == VOTING and (participant.id in run.voted or run.phase_over.is_set()):
+            first += 1
+        rows = [
+            {
+                "session_id": participant.session_id,
+                "round_number": n,
+                "participant_id": participant.id,
+                "kind": MISSING,
+                "cast_at": now,
+            }
+            for n in range(first, self._config.number_of_rounds + 1)
+        ]
+        if rows:
+            await conn.execute(pg_insert(votes).values(rows).on_conflict_do_nothing())
+        self._end_voting_if_all_voted(run)
+        log.info("Player %s dropped out of Session %s (Incomplete Session)", participant.player_label, participant.room_code)
 
     async def _emit_waiting(self, room_code: str, session_id: int) -> None:
         async with self._db.connect() as conn:

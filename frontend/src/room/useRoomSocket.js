@@ -66,6 +66,28 @@ function reducer(state, action) {
 // Close codes the server uses for refused joins (see backend/app/realtime.py).
 const CLOSE_REASONS = { 4404: "not_found", 4409: "full", 4423: "active", 4410: "completed", 4408: "expired" };
 
+// A Human who took part in a Session and left is a Dropout and can't rejoin.
+// The server refuses every join once a Session has started; this browser-side
+// marker (set when a Phase frame arrives) only picks the message to show.
+const TOOK_PART_KEY = (roomCode) => `mpp.took-part.${roomCode}`;
+const REFUSED_AFTER_START = new Set(["active", "completed"]);
+
+function rememberTookPart(roomCode) {
+  try {
+    window.localStorage.setItem(TOOK_PART_KEY(roomCode), "1");
+  } catch {
+    /* storage unavailable: the generic "already started" message is shown instead */
+  }
+}
+
+function tookPart(roomCode) {
+  try {
+    return window.localStorage.getItem(TOOK_PART_KEY(roomCode)) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function socketUrl(roomCode) {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/ws/${encodeURIComponent(roomCode)}`;
@@ -80,15 +102,21 @@ export default function useRoomSocket(roomCode) {
     wsRef.current = ws;
     let closedByUs = false;
     ws.onopen = () => ws.send(JSON.stringify({ type: "join" }));
+    // A refusal for an already started Session, to a browser that took part in it, means a Dropout.
+    const asDropout = (reason) => (REFUSED_AFTER_START.has(reason) && tookPart(roomCode) ? "dropout" : reason);
     ws.onmessage = (msg) => {
+      let frame;
       try {
-        dispatch(JSON.parse(msg.data));
+        frame = JSON.parse(msg.data);
       } catch {
-        /* ignore malformed frames */
+        return; /* ignore malformed frames */
       }
+      if (frame.type === "phase") rememberTookPart(roomCode);
+      if (frame.type === "error") frame = { ...frame, reason: asDropout(frame.reason) };
+      dispatch(frame);
     };
     ws.onclose = (ev) => {
-      if (!closedByUs) dispatch({ type: "socket_closed", reason: CLOSE_REASONS[ev.code] || "disconnected" });
+      if (!closedByUs) dispatch({ type: "socket_closed", reason: asDropout(CLOSE_REASONS[ev.code] || "disconnected") });
     };
     return () => {
       closedByUs = true;

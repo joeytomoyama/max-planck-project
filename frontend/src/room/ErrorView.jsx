@@ -7,6 +7,7 @@ const MESSAGES = {
   active: ["This Session has already started", "It can no longer be joined."],
   completed: ["This Session has ended", "It can no longer be joined."],
   expired: ["This Session has expired", "It was closed after a period of inactivity."],
+  dropout: ["You can't rejoin this Session", "You left the Session after it started, so you can't take part again."],
   disconnected: ["Connection lost", "The connection to the Session was closed."],
 };
 
