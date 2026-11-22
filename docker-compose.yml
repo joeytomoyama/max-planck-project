@@ -1,0 +1,39 @@
+# `docker compose up` starts everything: the app (FastAPI + built React) and PostgreSQL.
+# Host port: APP_PORT (default 8000), e.g. `APP_PORT=8080 docker compose up`.
+# LLM settings are optional and only read from the environment (or a .env file).
+
+services:
+  app:
+    build: .
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mpp:mpp@db:5432/mpp
+      CONFIG_PATH: /app/config.yml
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # reach a local LLM server (e.g. Ollama) on the host
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mpp
+      POSTGRES_PASSWORD: mpp
+      POSTGRES_DB: mpp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mpp -d mpp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

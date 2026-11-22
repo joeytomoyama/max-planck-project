@@ -1,0 +1,21 @@
+# Experiment configuration. Read once at startup: edit, then restart the app
+# (`docker compose restart app`) for changes to take effect.
+
+# Active Condition: the mix of Humans and AI Agents in every new Session.
+# Valid values: 3_humans | 2_humans_1_ai | 1_human_2_ai
+condition: 2_humans_1_ai
+
+# Phase timings. The server owns every timer.
+timings:
+  discussion_seconds: 60     # length of each Discussion Phase
+  voting_seconds: 20         # max length of each Voting Phase (ends early once everyone has voted)
+  inactivity_timeout_minutes: 15  # a Session expires after this long without activity
+
+# Mock mode: AI Agents send scripted messages and vote at random, with no LLM.
+# Turn it off to use a real OpenAI-compatible LLM. The endpoint, model and key
+# come only from the environment variables LLM_BASE_URL, LLM_MODEL and LLM_API_KEY.
+mock_mode: true
+
+# Show which Player Labels were Humans and which were AI Agents on the Result.
+# Off by default so future Participants don't learn what AI Agents sound like.
+reveal_identities_at_end: false
