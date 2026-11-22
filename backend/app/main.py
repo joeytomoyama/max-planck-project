@@ -34,6 +34,7 @@ def create_app(config: Config) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await persistence.create_schema(engine)
+        session_engine.start_expiry_sweeper()
         log.info(
             "Started with condition=%s mock_mode=%s reveal_identities_at_end=%s",
             config.condition.name,

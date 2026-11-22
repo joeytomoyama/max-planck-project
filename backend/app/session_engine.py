@@ -9,7 +9,9 @@ Join is two steps so the hub can register the socket in between:
 `join()` reserves a slot and a Player Label, `connected()` announces it and
 starts the Session once all Human slots are filled (the same transition as
 `start()`, the manual start endpoint). `disconnected()` frees the slot while
-the Session is still waiting.
+the Session is still waiting; during an active Session it makes the Human a
+Dropout (`_drop_out`). `expire_inactive()` expires Sessions left without
+activity (background sweeper plus a lazy check before every lookup).
 
 Once active, one asyncio task per Session (`_run_session`) walks the Rounds:
 each Round is a Discussion Phase then a Voting Phase. Every Phase goes through
@@ -67,6 +69,10 @@ class SessionNotFound(Exception):
 
 class NotWaiting(Exception):
     """`start()` on a Session that has already left the Waiting Room."""
+
+
+class SessionExpired(Exception):
+    """The Session expired after inactivity; REST refuses it (410)."""
 
 
 @dataclass(frozen=True)
@@ -148,9 +154,54 @@ class SessionEngine:
         self._subscribers: list[Subscriber] = []
         self._locks = _Locks()  # serialise joins/leaves/start per Session (single process)
         self._runs: dict[str, _Run] = {}  # room_code -> live state of active Sessions
+        self._sweeper: asyncio.Task | None = None
 
     def subscribe(self, subscriber: Subscriber) -> None:
         self._subscribers.append(subscriber)
+
+    # --- Inactivity expiry -------------------------------------------------
+
+    def start_expiry_sweeper(self) -> None:
+        """Expire inactive Sessions in the background (call once the event loop runs)."""
+        if self._sweeper is None:
+            self._sweeper = asyncio.create_task(self._sweep_forever(), name="session-expiry")
+
+    async def _sweep_forever(self) -> None:
+        timeout = self._config.timings.inactivity_timeout_minutes * 60
+        interval = min(max(timeout / 4, 1.0), 30.0)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.expire_inactive()
+            except Exception:  # noqa: BLE001 - e.g. DB briefly down; try again next tick
+                log.exception("Expiry sweep failed")
+
+    async def expire_inactive(self, room_code: str | None = None) -> list[str]:
+        """Mark `waiting`/`active` Sessions with no activity for the configured
+        timeout as `expired` (one Session, or all), and tell their sockets.
+
+        A Session whose Rounds are running in this process never expires: its
+        timers keep it moving. So `active` only expires when nothing runs it any
+        more, e.g. it was left `active` by an app restart mid-Session.
+        Called by the background sweeper and lazily before every lookup, so REST
+        and joins see the expiry on time even between sweeps.
+        """
+        cutoff = _now() - timedelta(minutes=self._config.timings.inactivity_timeout_minutes)
+        query = update(sessions).where(
+            sessions.c.status.in_(("waiting", "active")), sessions.c.last_activity < cutoff
+        )
+        if room_code is not None:
+            query = query.where(sessions.c.room_code == room_code)
+        if self._runs:
+            query = query.where(sessions.c.room_code.not_in(list(self._runs)))
+        async with self._db.begin() as conn:
+            expired = (
+                await conn.execute(query.values(status="expired", expires_at=func.now()).returning(sessions.c.room_code))
+            ).scalars().all()
+        for code in expired:
+            log.info("Session %s expired after inactivity", code)
+            await self._emit(Event(code, {"type": "closed", "reason": "expired"}))
+        return list(expired)
 
     async def _emit(self, event: Event) -> None:
         for subscriber in self._subscribers:
@@ -160,8 +211,10 @@ class SessionEngine:
                 log.exception("Event subscriber failed")
 
     async def shutdown(self) -> None:
-        """Cancel every Session's timer task (app shutdown)."""
+        """Cancel every Session's timer task and the expiry sweeper (app shutdown)."""
         tasks = [run.task for run in self._runs.values() if run.task]
+        if self._sweeper is not None:
+            tasks.append(self._sweeper)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -179,11 +232,15 @@ class SessionEngine:
         return room_code
 
     async def public_state(self, room_code: str) -> dict[str, Any]:
-        """Status, Round, Phase, deadline and Player Labels present. Never Participant types."""
+        """Status, Round, Phase, deadline and Player Labels present. Never Participant types.
+        Raises SessionNotFound or SessionExpired."""
+        await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
             session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
             if session is None:
                 raise SessionNotFound(room_code)
+            if session.status == "expired":
+                raise SessionExpired(room_code)
             labels = (
                 await conn.execute(
                     select(participants.c.player_label)
@@ -202,17 +259,22 @@ class SessionEngine:
         }
 
     async def ensure_exists(self, room_code: str) -> None:
+        """Raises SessionNotFound, or SessionExpired for an expired Session."""
+        await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
-            found = (
-                await conn.execute(select(sessions.c.id).where(sessions.c.room_code == room_code))
+            status = (
+                await conn.execute(select(sessions.c.status).where(sessions.c.room_code == room_code))
             ).scalar_one_or_none()
-        if found is None:
+        if status is None:
             raise SessionNotFound(room_code)
+        if status == "expired":
+            raise SessionExpired(room_code)
 
     # --- Waiting Room ----------------------------------------------------
 
     async def join(self, room_code: str) -> JoinedParticipant:
         """Reserve a Human slot with a random unused Player Label, or raise JoinRefused."""
+        await self.expire_inactive(room_code)
         async with self._locks.get(room_code):
             async with self._db.begin() as conn:
                 session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
@@ -265,26 +327,64 @@ class SessionEngine:
             pass
 
     async def disconnected(self, participant: JoinedParticipant) -> None:
-        """A Human's socket closed. Before the start this frees their slot."""
+        """A Human's socket closed. Before the start this frees their slot; during
+        an active Session it makes them a Dropout. Afterwards it changes nothing."""
         async with self._locks.get(participant.room_code):
             async with self._db.begin() as conn:
                 status = (
                     await conn.execute(select(sessions.c.status).where(sessions.c.id == participant.session_id))
                 ).scalar_one_or_none()
-                if status != "waiting":
-                    # Dropouts during an active Session (marking, `incomplete`): ticket #16.
-                    # Already here: they stop counting for the early end of voting.
-                    run = self._runs.get(participant.room_code)
-                    if run is not None:
-                        run.present.discard(participant.id)
-                        self._end_voting_if_all_voted(run)
+                if status == "active":
+                    await self._drop_out(conn, participant)
                     return
+                if status != "waiting":
+                    return  # completed or expired: nothing left to take part in
                 await conn.execute(delete(participants).where(participants.c.id == participant.id))
                 await conn.execute(
                     update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=func.now())
                 )
         log.info("Player %s left Session %s before the start", participant.player_label, participant.room_code)
         await self._emit_waiting(participant.room_code, participant.session_id)
+
+    async def _drop_out(self, conn, participant: JoinedParticipant) -> None:
+        """Mark a Dropout: `dropped_out_at`, Session `incomplete`, and every Vote
+        they can no longer cast written as `missing` (never an Abstention).
+
+        They leave `run.present`, so `vote()` refuses them and the early end of
+        voting only waits for those still connected. They cannot rejoin: joins
+        are only accepted while the Session is waiting. Nobody is told (no
+        presence signals, Blind Condition); the Session just carries on.
+        """
+        now = _now()
+        await conn.execute(
+            update(participants).where(participants.c.id == participant.id).values(dropped_out_at=now)
+        )
+        await conn.execute(
+            update(sessions).where(sessions.c.id == participant.session_id).values(incomplete=True, last_activity=now)
+        )
+        run = self._runs.get(participant.room_code)
+        if run is None:
+            return
+        run.present.discard(participant.id)
+        # The current Round only if they have not voted in it yet (`run.voted` is
+        # claimed synchronously in `vote()`, so this cannot race a Vote insert).
+        first = run.round or 1
+        if run.phase == VOTING and (participant.id in run.voted or run.phase_over.is_set()):
+            first += 1
+        rows = [
+            {
+                "session_id": participant.session_id,
+                "round_number": n,
+                "participant_id": participant.id,
+                "kind": MISSING,
+                "cast_at": now,
+            }
+            for n in range(first, self._config.number_of_rounds + 1)
+        ]
+        if rows:
+            await conn.execute(pg_insert(votes).values(rows).on_conflict_do_nothing())
+        self._end_voting_if_all_voted(run)
+        log.info("Player %s dropped out of Session %s (Incomplete Session)", participant.player_label, participant.room_code)
 
     async def _emit_waiting(self, room_code: str, session_id: int) -> None:
         async with self._db.connect() as conn:
@@ -305,13 +405,16 @@ class SessionEngine:
 
         The manual start endpoint calls this directly; `connected()` calls it with
         `only_when_full` so it fires once every Human slot is taken.
-        Raises SessionNotFound, or NotWaiting when the Session is not waiting.
+        Raises SessionNotFound, SessionExpired, or NotWaiting when the Session is not waiting.
         """
+        await self.expire_inactive(room_code)
         async with self._locks.get(room_code):
             async with self._db.begin() as conn:
                 session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
                 if session is None:
                     raise SessionNotFound(room_code)
+                if session.status == "expired":
+                    raise SessionExpired(room_code)
                 if session.status != "waiting":
                     raise NotWaiting(room_code)
                 used = set(
