@@ -9,7 +9,9 @@ Join is two steps so the hub can register the socket in between:
 `join()` reserves a slot and a Player Label, `connected()` announces it and
 starts the Session once all Human slots are filled (the same transition as
 `start()`, the manual start endpoint). `disconnected()` frees the slot while
-the Session is still waiting.
+the Session is still waiting; during an active Session it makes the Human a
+Dropout (`_drop_out`). `expire_inactive()` expires Sessions left without
+activity (background sweeper plus a lazy check before every lookup).
 
 Once active, one asyncio task per Session (`_run_session`) walks the Rounds:
 each Round is a Discussion Phase then a Voting Phase. Every Phase goes through
