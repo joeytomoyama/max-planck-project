@@ -86,3 +86,35 @@ body {
   flex: 1;
   padding: 0.5rem;
 }
+
+.ballot {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ballot button {
+  padding: 0.6rem 1rem;
+  font-size: 1rem;
+}
+
+.recorded {
+  font-weight: 600;
+}
+
+.counts {
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.counts caption {
+  text-align: left;
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.counts th,
+.counts td {
+  padding: 0.25rem 1rem 0.25rem 0;
+  text-align: left;
+}
