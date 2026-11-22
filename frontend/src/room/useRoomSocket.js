@@ -1,10 +1,21 @@
-import { useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 
 // One WebSocket per room page. All Session state arrives as server frames and
-// is folded into `state` by the reducer; the page never polls. Later tickets
-// add cases for phase / chat / vote_recorded / result frames and a `send`.
+// is folded into `state` by the reducer; the page never polls. `send` writes a
+// client frame (e.g. `{type: "chat", text}`). Later tickets add cases for
+// vote_recorded / result frames.
 
-const initialState = { view: "connecting", playerLabel: null, filled: 0, total: 0, error: null };
+const initialState = {
+  view: "connecting", // connecting | waiting | discussion | voting | error
+  playerLabel: null,
+  filled: 0,
+  total: 0,
+  round: null,
+  deadline: null, // server deadline of the current Phase, in *client* clock ms
+  messages: [], // [{player_label, text, sent_at}] of the current Round's Discussion Phase
+  notice: null, // last non-fatal error reason (e.g. empty_message, chat_closed)
+  error: null,
+};
 
 function reducer(state, action) {
   switch (action.type) {
@@ -12,9 +23,31 @@ function reducer(state, action) {
       return { ...state, playerLabel: action.player_label };
     case "waiting":
       return { ...state, view: "waiting", filled: action.filled, total: action.total };
+    case "phase": {
+      // Shift the server deadline by the measured clock offset so every client
+      // counts down to the same instant whatever its own clock says.
+      const offset = Date.now() - Date.parse(action.server_time);
+      const newRound = action.round !== state.round;
+      return {
+        ...state,
+        view: action.phase,
+        round: action.round,
+        deadline: Date.parse(action.deadline) + offset,
+        messages: newRound ? [] : state.messages,
+        notice: null,
+      };
+    }
+    case "chat":
+      return {
+        ...state,
+        messages: [...state.messages, { player_label: action.player_label, text: action.text, sent_at: action.sent_at }],
+      };
+    case "closed":
+      return { ...state, view: "error", error: action.reason };
     case "error":
-      // An error frame before we joined means the join was refused.
-      return state.playerLabel && action.reason === "unsupported" ? state : { ...state, view: "error", error: action.reason };
+      // Before we joined, an error means the join was refused; afterwards it is
+      // a rejected frame (empty chat message, chat closed, ...) and not fatal.
+      return state.playerLabel ? { ...state, notice: action.reason } : { ...state, view: "error", error: action.reason };
     case "socket_closed":
       return state.view === "error" ? state : { ...state, view: "error", error: action.reason };
     default:
@@ -32,9 +65,11 @@ export function socketUrl(roomCode) {
 
 export default function useRoomSocket(roomCode) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const wsRef = useRef(null);
 
   useEffect(() => {
     const ws = new WebSocket(socketUrl(roomCode));
+    wsRef.current = ws;
     let closedByUs = false;
     ws.onopen = () => ws.send(JSON.stringify({ type: "join" }));
     ws.onmessage = (msg) => {
@@ -49,9 +84,15 @@ export default function useRoomSocket(roomCode) {
     };
     return () => {
       closedByUs = true;
+      wsRef.current = null;
       ws.close();
     };
   }, [roomCode]);
 
-  return state;
+  const send = useCallback((frame) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+  }, []);
+
+  return [state, send];
 }
