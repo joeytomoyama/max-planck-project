@@ -1,24 +1,45 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
-// Researcher page. Ticket #11 adds the "Create Session" button and share link.
-// For now it shows whether the backend can reach the database (one fetch on load).
+// Researcher page: create a Session and share its link with the Humans.
 export default function WaitingPage() {
-  const [db, setDb] = useState("checking");
+  const [link, setLink] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then((body) => setDb(body.database === "ok" ? "connected" : "unreachable"))
-      .catch(() => setDb("unreachable"));
-  }, []);
+  async function createSession() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/sessions", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      setLink(body.share_link);
+    } catch (e) {
+      setError("Could not create a Session. Is the server running?");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <section>
       <h1>Waiting Room</h1>
       <p>Create a Session and share its link with the Humans taking part.</p>
-      <p className="status" data-testid="db-status">
-        Database: {db}
-      </p>
+      <button type="button" onClick={createSession} disabled={busy}>
+        Create Session
+      </button>
+      {link && (
+        <div className="share">
+          <p>Share this link:</p>
+          <a href={link} target="_blank" rel="noreferrer" data-testid="share-link">
+            {link}
+          </a>
+          <button type="button" onClick={() => navigator.clipboard?.writeText(link)}>
+            Copy
+          </button>
+        </div>
+      )}
+      {error && <p className="error">{error}</p>}
     </section>
   );
 }
