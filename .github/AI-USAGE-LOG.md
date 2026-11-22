@@ -2,9 +2,27 @@
 
 ## Overview
 
-This document tracks all AI-assisted development work done on the Max Planck Project. Per specification, this ensures transparency about prompts and models used during implementation of ticket #01.
+This document tracks all AI-assisted development work done on the Max Planck Project: the
+prompts, and the exact models and tools used. The AI Agents' own runtime prompts (what the
+app sends to an LLM) are documented separately in [`ai_prompts.md`](../ai_prompts.md).
 
-## Development Session: Nov 20, 2026
+The project was built in three stages:
+
+| Stage | Dates | Tool | Model | Result |
+|---|---|---|---|---|
+| 1. First attempt (scrapped) | 2026-11-20 | opencode with the mattpocock-skills | `qwen3.5:9b` on a local Ollama | Tickets #1-#8 and code for #1-#3, kept on the `qwen-attempt` branch |
+| 2. Review, restart and grilling | 2026-11-22 | Claude Code (Claude desktop app, Code tab) with the mattpocock-skills plugin | Claude Opus 5.5 (`claude-opus-5-5`) | Old code cleared, `GLOSSARY.md`, ADR 0001, spec issue #9, tickets #10-#17 |
+| 3. Rebuild from spec #9 | 2026-11-22 to 2026-11-23 | Claude Code (Claude desktop app) with the mattpocock-skills plugin and the Playwright MCP server | Claude Opus 5.5 (`claude-opus-5-5`) for the orchestrator and every implementer subagent | The current code on `spec-9-rebuild`, one branch per ticket |
+
+---
+
+## Stage 1: Development Session: Nov 20, 2026 (first attempt, scrapped)
+
+> Note added in stage 3: this section is the original log of the first attempt and is kept
+> unchanged below for the record. The files it lists were removed from `main` in commit
+> `be1418f` and survive only on the `qwen-attempt` branch; they do not describe the current
+> code. The prompts below are the paraphrases written at the time; the raw opencode session
+> was not exported.
 
 ### Model Used
 
@@ -65,13 +83,80 @@ The following were key prompts (or prompt categories) used:
 - **Temperature**: 0.7 for creativity (when enabled)
 - **Deterministic Testing**: Seed-based responses for reproducibility
 
-## Future Logging
-
-Additional AI usage will be logged here when:
-- New feature tickets are implemented
-- Prompt strategies evolve
-- Production LLM calls are integrated
-
 ---
 
-*This log is maintained per Specification section 12 (AI Usage Log Location).*
+## Stage 2: Review, restart and grilling (Nov 22, 2026)
+
+- **Tool:** Claude Code in the Claude desktop app (Code tab), mattpocock-skills plugin
+  (`ask-matt`, `grilling`, `domain-modeling`).
+- **Model:** Claude Opus 5.5 (`claude-opus-5-5`).
+- **Full transcript** (every user prompt verbatim, every reply, tool calls summarised):
+  [`ai-prompts/2026-11-22-claude-code-review-and-grilling.md`](ai-prompts/2026-11-22-claude-code-review-and-grilling.md).
+
+What happened, in order of the user's prompts:
+
+1. `/mattpocock-skills:ask-matt` asking whether to code-review the qwen code and file
+   improvement tickets. Claude rated the code about 4/10 (broken data model behind
+   green tests that faked the database) and recommended a rebuild.
+2. "No, just restart": the old code moved to the `qwen-attempt` branch, `main` cleared
+   to the planning files (commit `be1418f`).
+3. "Yes, grill me": a grilling session on every open design question. The user's rule
+   "for any conflicts we follow the SPEC.md" reversed several earlier answers. Outcomes:
+   `GLOSSARY.md`, [ADR 0001](../docs/adr/0001-voting-design-for-human-vs-ai-choice.md)
+   (Round 1 hidden, both Rounds count, self-votes allowed), the Dropout and
+   reveal-setting decisions, and the one-app-image decision (commit `98e080c`).
+4. From those decisions, spec issue #9 ("Spec: Multi-participant Human-AI experiment
+   platform (rebuild)") and its vertical-slice tickets #10-#17 were filed on GitHub,
+   replacing the stale #1-#8. The issues themselves are the record of that output.
+
+## Stage 3: Rebuild from spec #9 (Nov 22-23, 2026)
+
+- **Tool:** Claude Code in the Claude desktop app, with:
+  - the mattpocock-skills plugin: `implement-spec` (orchestration), `tdd`
+    (red-green loop; here "tests" are browser checks, since SPEC.md rules out a test
+    suite) and `code-review` (standards and spec review of each ticket),
+  - the **Playwright MCP** server for end-to-end checks in a real Chromium against
+    `docker compose up` (mock mode, shortened timings),
+  - Docker Compose, `gh` (GitHub CLI) for reading the issues, git worktrees.
+- **Model:** Claude Opus 5.5 (`claude-opus-5-5`) for the orchestrating session and for
+  every implementer subagent. No other model was used for code in this stage.
+- **AI Agent runtime model** (not a development tool): manual real-LLM checks used
+  `qwen3.5:9b` on a local Ollama, see `ai_prompts.md`.
+
+### Prompts
+
+The user's prompt to the orchestrator was the skill command:
+
+```
+/mattpocock-skills:implement-spec #9
+```
+
+The orchestrator read spec #9 and its sub-issues and started one implementer
+subagent per ticket, in dependency order, each in its own git worktree and branch
+(`ticket-NN`), then merged the branch into the integration branch `spec-9-rebuild`.
+Each implementer's prompt was the GitHub issue for its ticket (read with
+`gh issue view`), plus the parent spec #9, SPEC.md (which wins any conflict),
+`GLOSSARY.md`, ADR 0001, hand-over notes from the earlier tickets, and working rules
+(start from `spec-9-rebuild`, use the `tdd` skill with Playwright MCP as the test
+seam, use a separate Docker Compose project and port, small commits, no pushing).
+The issues are the authoritative text of those prompts:
+
+| Ticket | Issue title | Merge commit on `spec-9-rebuild` |
+|---|---|---|
+| #10 | App skeleton with config check | `deae9d3` |
+| #11 | Create a Session and join the Waiting Room | `b40886c` |
+| #12 | Session starts on its own, with the Discussion Phase | `dc35b53` |
+| #13 | Voting Phase, two Rounds and the Result | `d8a410b` |
+| #16 | Dropouts, Incomplete Sessions and expiry | `0389ecf` |
+| #14 | AI Agents in mock mode, Blind Condition check and reveal setting | `cd50dcb` |
+| #15 | Real LLM for AI Agents | `d0202c7` |
+| #17 | Docs and test checklist (this file, README, ARCHITECTURE.md, TESTING.md) | branch `ticket-17` |
+
+Read them with `gh issue view <n> --repo joeytomoyama/max-planck-project`. Every
+commit made by an agent ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+
+### Not exported
+
+The orchestrator and subagent transcripts of stage 3 are not exported into the repo.
+The issues above, the commits and their messages are the record of what each agent was
+asked to do and what it did.
