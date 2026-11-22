@@ -46,6 +46,17 @@ class Timings:
 
 
 @dataclass(frozen=True)
+class AIAgentSettings:
+    """How AI Agents chat and vote (`ai_agents:` in config.yml). Prompts: #15."""
+
+    reply_rate: float  # chance of replying to each message from another Participant
+    message_delay_seconds: tuple[float, float]  # (min, max) wait before each message
+    max_messages_per_phase: int  # cap per Discussion Phase, opening message included
+    vote_delay_seconds: tuple[float, float]  # (min, max) wait before voting
+    tone: str  # chat style, e.g. "casual"
+
+
+@dataclass(frozen=True)
 class LLMSettings:
     """OpenAI-compatible endpoint settings. All optional; only needed with mock mode off."""
 
@@ -69,6 +80,7 @@ class Config:
     number_of_rounds: int
     mock_mode: bool
     reveal_identities_at_end: bool
+    ai_agents: AIAgentSettings
     llm: LLMSettings
     raw: Mapping[str, Any]  # the parsed file, for sections later modules own (e.g. AI Agent settings)
 
@@ -105,6 +117,7 @@ def load_config(path: Path | None = None, env: Mapping[str, str] = os.environ) -
         number_of_rounds=NUMBER_OF_ROUNDS,
         mock_mode=_bool(data, "mock_mode", default=True),
         reveal_identities_at_end=_bool(data, "reveal_identities_at_end", default=False),
+        ai_agents=_ai_agents(data.get("ai_agents") or {}),
         llm=LLMSettings.from_env(env),
         raw=data,
     )
@@ -132,6 +145,41 @@ def _timings(section: Any) -> Timings:
             raise ConfigError(f"Invalid `timings.{key}: {value}` in config.yml. Must be a positive number")
         values[key] = value
     return Timings(**values)
+
+
+def _ai_agents(section: Any) -> AIAgentSettings:
+    if not isinstance(section, dict):
+        raise ConfigError("`ai_agents:` in config.yml must be a mapping")
+
+    def number(key: str, default: float, low: float, high: float | None = None) -> float:
+        value = section.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < low or (high is not None and value > high):
+            bounds = f"between {low} and {high}" if high is not None else f"at least {low}"
+            raise ConfigError(f"Invalid `ai_agents.{key}: {value}` in config.yml. Must be a number {bounds}")
+        return value
+
+    def span(key: str, default: tuple[float, float]) -> tuple[float, float]:
+        value = section.get(key, {"min": default[0], "max": default[1]})
+        low, high = (value.get("min"), value.get("max")) if isinstance(value, dict) else (None, None)
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in (low, high)) or low > high:
+            raise ConfigError(
+                f"Invalid `ai_agents.{key}: {value}` in config.yml. Must be {{min: N, max: M}} with 0 <= N <= M"
+            )
+        return (low, high)
+
+    max_messages = number("max_messages_per_phase", 4, 0)
+    if int(max_messages) != max_messages:
+        raise ConfigError(f"Invalid `ai_agents.max_messages_per_phase: {max_messages}` in config.yml. Must be a whole number")
+    tone = section.get("tone", "casual")
+    if not isinstance(tone, str) or not tone.strip():
+        raise ConfigError(f"Invalid `ai_agents.tone: {tone}` in config.yml. Must be text")
+    return AIAgentSettings(
+        reply_rate=number("reply_rate", 0.5, 0, 1),
+        message_delay_seconds=span("message_delay_seconds", (3, 10)),
+        max_messages_per_phase=int(max_messages),
+        vote_delay_seconds=span("vote_delay_seconds", (1, 4)),
+        tone=tone.strip(),
+    )
 
 
 def _bool(data: Mapping[str, Any], key: str, default: bool) -> bool:

@@ -9,7 +9,7 @@ const initialState = {
   playerLabel: null,
   playerLabels: [], // every Player Label in the Session (the ballot)
   votedRound: null, // Round whose Vote the server acknowledged
-  result: null, // {counts: {"Player X": n}, decision_maker}
+  result: null, // {counts: {"Player X": n}, decision_maker, types: {"Player X": "human"|"ai"} only if the reveal is on}
   filled: 0,
   total: 0,
   round: null,
@@ -48,7 +48,7 @@ function reducer(state, action) {
     case "vote_recorded":
       return { ...state, votedRound: action.round };
     case "result":
-      return { ...state, view: "result", result: { counts: action.counts, decision_maker: action.decision_maker } };
+      return { ...state, view: "result", result: { counts: action.counts, decision_maker: action.decision_maker, types: action.types || null } };
     case "closed":
       return { ...state, view: "error", error: action.reason };
     case "error":
