@@ -41,6 +41,7 @@ def create_app(config: Config) -> FastAPI:
             config.reveal_identities_at_end,
         )
         yield
+        await session_engine.shutdown()
         await engine.dispose()
 
     # The async engine connects lazily, so it is safe to build before the lifespan runs.
@@ -54,7 +55,7 @@ def create_app(config: Config) -> FastAPI:
     app.state.session_engine = session_engine
 
     app.include_router(_health_router(), prefix="/api")
-    app.include_router(sessions_router(session_engine), prefix="/api")
+    app.include_router(sessions_router(session_engine, config), prefix="/api")
     app.include_router(ws_router(hub))  # must come before the SPA catch-all
     _mount_spa(app, static_dir())
     return app
