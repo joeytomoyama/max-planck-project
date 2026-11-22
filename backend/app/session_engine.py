@@ -232,7 +232,7 @@ class SessionEngine:
         return room_code
 
     async def public_state(self, room_code: str) -> dict[str, Any]:
-        """Status, Round, Phase, deadline and Player Labels present. Never Participant types.
+        """Status, Round, Phase, deadline and Player Labels (Dropouts included). Never Participant types.
         Raises SessionNotFound or SessionExpired."""
         await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
@@ -241,10 +241,13 @@ class SessionEngine:
                 raise SessionNotFound(room_code)
             if session.status == "expired":
                 raise SessionExpired(room_code)
+            # Dropouts stay listed: only Humans drop out, so hiding their label would
+            # reveal a Human and signal presence (Blind Condition). Before the start a
+            # Human who leaves is deleted, so the Waiting Room still shows who is there.
             labels = (
                 await conn.execute(
                     select(participants.c.player_label)
-                    .where(participants.c.session_id == session.id, participants.c.dropped_out_at.is_(None))
+                    .where(participants.c.session_id == session.id)
                     .order_by(participants.c.player_label)
                 )
             ).scalars().all()
