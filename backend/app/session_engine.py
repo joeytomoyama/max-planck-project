@@ -439,8 +439,16 @@ class SessionEngine:
                     decided_by_tiebreak=result.decided_by_tiebreak,
                 )
             )
+            types = None
+            if self._config.reveal_identities_at_end:
+                rows = await conn.execute(
+                    select(participants.c.player_label, participants.c.type).where(
+                        participants.c.session_id == run.session_id
+                    )
+                )
+                types = {row.player_label: row.type for row in rows}
         run.round, run.phase, run.deadline = None, None, None
-        await self._emit(Event(room_code, self._result_frame(result)))
+        await self._emit(Event(room_code, self._result_frame(result, types)))
         log.info(
             "Session %s completed: Decision Maker Player %s%s",
             room_code,
@@ -449,14 +457,17 @@ class SessionEngine:
         )
 
     @staticmethod
-    def _result_frame(result: Result) -> dict[str, Any]:
-        # Player Labels and counts only. The optional Human/AI reveal (#14) adds
-        # a `types` field here when `reveal_identities_at_end` is on.
-        return {
+    def _result_frame(result: Result, types: dict[str, str] | None = None) -> dict[str, Any]:
+        # Player Labels and counts only. `types` (letter -> "human" | "ai") is passed
+        # only when `reveal_identities_at_end` is on: the one frame that may carry them.
+        frame = {
             "type": "result",
             "counts": {f"Player {label}": n for label, n in sorted(result.counts.items())},
             "decision_maker": f"Player {result.decision_maker}",
         }
+        if types is not None:
+            frame["types"] = {f"Player {label}": kind for label, kind in sorted(types.items())}
+        return frame
 
     async def _enter_phase(self, room_code: str, run: _Run, round_number: int, phase: str, seconds: float) -> datetime:
         start = _now()
