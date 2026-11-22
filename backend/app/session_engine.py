@@ -23,7 +23,9 @@ Voting: `vote()` is the one path for every Participant's Vote (Humans via the
 hub, AI Agents via their runner). The Voting Phase ends early once every
 Participant in `_Run.present` (connected Humans + AI Agents) has voted. At its
 end, everyone who did not vote is written as an Abstention, or as `missing`
-if they are no longer present (a Dropout). After the last Round, the pure
+if they were no longer present at the close (a Dropout). Storing a Vote and
+closing the ballot box take the same per-Session lock (`_Run.ballot_box`), so
+an acknowledged Vote is always in the Round's results. After the last Round, the pure
 `vote_tally.tally` gives the Result.
 """
 
@@ -43,7 +45,19 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .config import CONDITIONS, Config
-from .persistence import messages, participants, rounds, sessions, votes
+from .persistence import (
+    ACTIVE,
+    AI,
+    COMPLETED,
+    EXPIRED,
+    HUMAN,
+    WAITING,
+    messages,
+    participants,
+    rounds,
+    sessions,
+    votes,
+)
 from .vote_tally import ABSTENTION, MISSING, VOTE, Ballot, Result, round_summary, tally
 
 log = logging.getLogger(__name__)
@@ -53,6 +67,22 @@ MAX_CHAT_LENGTH = 500  # characters; longer messages are cut, not rejected
 
 DISCUSSION = "discussion"
 VOTING = "voting"
+
+
+class PlayerLabel:
+    """The one place that turns a stored letter ("B") into the wire form
+    ("Player B") and back. The database and `_Run.labels` hold letters."""
+
+    PREFIX = "Player "
+
+    @staticmethod
+    def format(letter: str) -> str:
+        return PlayerLabel.PREFIX + letter
+
+    @staticmethod
+    def parse(label: Any) -> str | None:
+        """The letter of "Player B" (or of a bare "B"); None for a non-string."""
+        return label.removeprefix(PlayerLabel.PREFIX).strip() if isinstance(label, str) else None
 
 
 class JoinRefused(Exception):
@@ -126,6 +156,9 @@ class _Run:
     labels: dict[int, str] = field(default_factory=dict)  # participant id -> Player Label letter
     present: set[int] = field(default_factory=set)  # ids still taking part: connected Humans + AI Agents
     voted: set[int] = field(default_factory=set)  # ids that voted in the current Voting Phase
+    # Held while a Vote is checked and stored, and while voting closes, so a Vote
+    # is either stored before the ballot box closes or refused (`vote_closed`).
+    ballot_box: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁠-⁩﻿]")
@@ -188,7 +221,7 @@ class SessionEngine:
         """
         cutoff = _now() - timedelta(minutes=self._config.timings.inactivity_timeout_minutes)
         query = update(sessions).where(
-            sessions.c.status.in_(("waiting", "active")), sessions.c.last_activity < cutoff
+            sessions.c.status.in_((WAITING, ACTIVE)), sessions.c.last_activity < cutoff
         )
         if room_code is not None:
             query = query.where(sessions.c.room_code == room_code)
@@ -196,7 +229,7 @@ class SessionEngine:
             query = query.where(sessions.c.room_code.not_in(list(self._runs)))
         async with self._db.begin() as conn:
             expired = (
-                await conn.execute(query.values(status="expired", expires_at=func.now()).returning(sessions.c.room_code))
+                await conn.execute(query.values(status=EXPIRED, expires_at=func.now()).returning(sessions.c.room_code))
             ).scalars().all()
         for code in expired:
             log.info("Session %s expired after inactivity", code)
@@ -226,25 +259,24 @@ class SessionEngine:
         room_code = secrets.token_urlsafe(9)  # 12 URL-safe chars, ~72 bits: not enumerable
         async with self._db.begin() as conn:
             await conn.execute(
-                insert(sessions).values(room_code=room_code, condition=self._config.condition.name, status="waiting")
+                insert(sessions).values(room_code=room_code, condition=self._config.condition.name, status=WAITING)
             )
         log.info("Created Session %s (condition=%s)", room_code, self._config.condition.name)
         return room_code
 
     async def public_state(self, room_code: str) -> dict[str, Any]:
-        """Status, Round, Phase, deadline and Player Labels present. Never Participant types.
+        """Status, Round, Phase, deadline and Player Labels (Dropouts included). Never Participant types.
         Raises SessionNotFound or SessionExpired."""
         await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
-            session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
-            if session is None:
-                raise SessionNotFound(room_code)
-            if session.status == "expired":
-                raise SessionExpired(room_code)
+            session = await self._load_session(conn, room_code)
+            # Dropouts stay listed: only Humans drop out, so hiding their label would
+            # reveal a Human and signal presence (Blind Condition). Before the start a
+            # Human who leaves is deleted, so the Waiting Room still shows who is there.
             labels = (
                 await conn.execute(
                     select(participants.c.player_label)
-                    .where(participants.c.session_id == session.id, participants.c.dropped_out_at.is_(None))
+                    .where(participants.c.session_id == session.id)
                     .order_by(participants.c.player_label)
                 )
             ).scalars().all()
@@ -255,20 +287,24 @@ class SessionEngine:
             "round": run.round if run else None,
             "phase": run.phase if run else None,
             "phase_deadline": run.deadline.isoformat() if run and run.deadline else None,
-            "player_labels": [f"Player {label}" for label in labels],
+            "player_labels": [PlayerLabel.format(label) for label in labels],
         }
 
     async def ensure_exists(self, room_code: str) -> None:
         """Raises SessionNotFound, or SessionExpired for an expired Session."""
         await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
-            status = (
-                await conn.execute(select(sessions.c.status).where(sessions.c.room_code == room_code))
-            ).scalar_one_or_none()
-        if status is None:
+            await self._load_session(conn, room_code)
+
+    @staticmethod
+    async def _load_session(conn, room_code: str):
+        """The Session row for a Room Code. Raises SessionNotFound, or SessionExpired."""
+        session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
+        if session is None:
             raise SessionNotFound(room_code)
-        if status == "expired":
+        if session.status == EXPIRED:
             raise SessionExpired(room_code)
+        return session
 
     # --- Waiting Room ----------------------------------------------------
 
@@ -280,7 +316,7 @@ class SessionEngine:
                 session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
                 if session is None:
                     raise JoinRefused("not_found")
-                if session.status != "waiting":
+                if session.status != WAITING:
                     raise JoinRefused(session.status)  # active | completed | expired
                 used = set(
                     (
@@ -295,7 +331,7 @@ class SessionEngine:
                 participant_id = (
                     await conn.execute(
                         insert(participants)
-                        .values(session_id=session.id, player_label=label, type="human")
+                        .values(session_id=session.id, player_label=label, type=HUMAN)
                         .returning(participants.c.id)
                     )
                 ).scalar_one()
@@ -311,7 +347,7 @@ class SessionEngine:
         await self._emit(
             Event(
                 participant.room_code,
-                {"type": "joined", "player_label": f"Player {participant.player_label}"},
+                {"type": "joined", "player_label": PlayerLabel.format(participant.player_label)},
                 recipient=participant.id,
             )
         )
@@ -334,10 +370,10 @@ class SessionEngine:
                 status = (
                     await conn.execute(select(sessions.c.status).where(sessions.c.id == participant.session_id))
                 ).scalar_one_or_none()
-                if status == "active":
+                if status == ACTIVE:
                     await self._drop_out(conn, participant)
                     return
-                if status != "waiting":
+                if status != WAITING:
                     return  # completed or expired: nothing left to take part in
                 await conn.execute(delete(participants).where(participants.c.id == participant.id))
                 await conn.execute(
@@ -367,7 +403,8 @@ class SessionEngine:
             return
         run.present.discard(participant.id)
         # The current Round only if they have not voted in it yet (`run.voted` is
-        # claimed synchronously in `vote()`, so this cannot race a Vote insert).
+        # claimed before the Vote insert awaits, so this cannot race it), and not
+        # once the ballot box has closed: the close gives them an Abstention.
         first = run.round or 1
         if run.phase == VOTING and (participant.id in run.voted or run.phase_over.is_set()):
             first += 1
@@ -410,12 +447,8 @@ class SessionEngine:
         await self.expire_inactive(room_code)
         async with self._locks.get(room_code):
             async with self._db.begin() as conn:
-                session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
-                if session is None:
-                    raise SessionNotFound(room_code)
-                if session.status == "expired":
-                    raise SessionExpired(room_code)
-                if session.status != "waiting":
+                session = await self._load_session(conn, room_code)
+                if session.status != WAITING:
                     raise NotWaiting(room_code)
                 used = set(
                     (
@@ -431,12 +464,12 @@ class SessionEngine:
                 random.shuffle(free)
                 for label in free[:ais]:
                     await conn.execute(
-                        insert(participants).values(session_id=session.id, player_label=label, type="ai")
+                        insert(participants).values(session_id=session.id, player_label=label, type=AI)
                     )
                 await conn.execute(
                     update(sessions)
                     .where(sessions.c.id == session.id)
-                    .values(status="active", last_activity=func.now())
+                    .values(status=ACTIVE, last_activity=func.now())
                 )
                 everyone = (
                     await conn.execute(
@@ -486,8 +519,14 @@ class SessionEngine:
         await self._enter_phase(room_code, run, round_number, VOTING, self._config.timings.voting_seconds)
         self._end_voting_if_all_voted(run)  # e.g. nobody is present any more
         await self._wait_phase(run)
-        run.phase_over.set()  # closes the ballot box: `vote()` refuses from here on
+        # No await until both lines ran: from here `vote()` refuses and `_drop_out`
+        # leaves this Round alone, so whoever was present at the close (even if they
+        # disconnect a moment later) gets an Abstention rather than `missing`.
+        run.phase_over.set()  # closes the ballot box
+        present_at_close = set(run.present)
         ended = _now()
+        async with run.ballot_box:  # wait for a Vote that is being stored right now
+            voted = set(run.voted)
         # Whoever did not vote: an Abstention if still present, else missing (Dropout).
         # ON CONFLICT DO NOTHING keeps a row already written (e.g. by #16 at dropout).
         absent = [
@@ -495,11 +534,11 @@ class SessionEngine:
                 "session_id": run.session_id,
                 "round_number": round_number,
                 "participant_id": pid,
-                "kind": ABSTENTION if pid in run.present else MISSING,
+                "kind": ABSTENTION if pid in present_at_close else MISSING,
                 "cast_at": ended,
             }
             for pid in run.labels
-            if pid not in run.voted
+            if pid not in voted
         ]
         async with self._db.begin() as conn:
             if absent:
@@ -535,7 +574,7 @@ class SessionEngine:
                 update(sessions)
                 .where(sessions.c.id == run.session_id)
                 .values(
-                    status="completed",
+                    status=COMPLETED,
                     completed_at=func.now(),
                     last_activity=func.now(),
                     decision_maker=result.decision_maker,
@@ -565,11 +604,11 @@ class SessionEngine:
         # only when `reveal_identities_at_end` is on: the one frame that may carry them.
         frame = {
             "type": "result",
-            "counts": {f"Player {label}": n for label, n in sorted(result.counts.items())},
-            "decision_maker": f"Player {result.decision_maker}",
+            "counts": {PlayerLabel.format(label): n for label, n in sorted(result.counts.items())},
+            "decision_maker": PlayerLabel.format(result.decision_maker),
         }
         if types is not None:
-            frame["types"] = {f"Player {label}": kind for label, kind in sorted(types.items())}
+            frame["types"] = {PlayerLabel.format(label): kind for label, kind in sorted(types.items())}
         return frame
 
     async def _enter_phase(self, room_code: str, run: _Run, round_number: int, phase: str, seconds: float) -> datetime:
@@ -598,7 +637,7 @@ class SessionEngine:
             "phase": run.phase,
             "deadline": run.deadline.isoformat(),
             "server_time": _now().isoformat(),
-            "player_labels": [f"Player {label}" for label in sorted(run.labels.values())],  # the ballot
+            "player_labels": [PlayerLabel.format(label) for label in sorted(run.labels.values())],  # the ballot
         }
 
     # --- Chat ------------------------------------------------------------
@@ -640,7 +679,7 @@ class SessionEngine:
                 participant.room_code,
                 {
                     "type": "chat",
-                    "player_label": f"Player {participant.player_label}",
+                    "player_label": PlayerLabel.format(participant.player_label),
                     "text": clean,
                     "sent_at": sent_at.isoformat(),
                 },
@@ -657,40 +696,60 @@ class SessionEngine:
         Rejections: `vote_closed`, `bad_vote` (unknown label), `already_voted`.
         """
         run = self._runs.get(participant.room_code)
-        if run is None or run.phase != VOTING or run.phase_over.is_set() or participant.id not in run.present:
+        if run is None:
             await self._reject(participant, "vote_closed")
             return
-        letter = target.removeprefix("Player ").strip() if isinstance(target, str) else None
-        target_id = next((pid for pid, label in run.labels.items() if label == letter), None)
-        if target_id is None:
-            await self._reject(participant, "bad_vote")
+        # Checked and stored under the ballot box lock: closing the Voting Phase
+        # waits for a Vote in flight, so a stored Vote is always counted.
+        async with run.ballot_box:
+            reason = self._vote_refusal(run, participant, target)
+            if reason is None:
+                round_number = run.round
+                await self._store_vote(run, participant, target)
+                self._end_voting_if_all_voted(run)
+        if reason is not None:
+            await self._reject(participant, reason)
             return
-        if participant.id in run.voted:
-            await self._reject(participant, "already_voted")
-            return
-        run.voted.add(participant.id)  # claimed before any await: no double Vote under races
-        round_number, cast_at = run.round, _now()
-        async with self._db.begin() as conn:
-            await conn.execute(
-                insert(votes).values(
-                    session_id=participant.session_id,
-                    round_number=round_number,
-                    participant_id=participant.id,
-                    target_participant=target_id,
-                    kind=VOTE,
-                    cast_at=cast_at,
-                )
-            )
-            await conn.execute(
-                update(participants).where(participants.c.id == participant.id).values(last_activity=cast_at)
-            )
-            await conn.execute(
-                update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=cast_at)
-            )
         await self._emit(
             Event(participant.room_code, {"type": "vote_recorded", "round": round_number}, recipient=participant.id)
         )
-        self._end_voting_if_all_voted(run)
+
+    @staticmethod
+    def _vote_refusal(run: _Run, participant: JoinedParticipant, target: Any) -> str | None:
+        if run.phase != VOTING or run.phase_over.is_set() or participant.id not in run.present:
+            return "vote_closed"
+        if PlayerLabel.parse(target) not in run.labels.values():
+            return "bad_vote"
+        if participant.id in run.voted:
+            return "already_voted"
+        return None
+
+    async def _store_vote(self, run: _Run, participant: JoinedParticipant, target: str) -> None:
+        letter = PlayerLabel.parse(target)
+        target_id = next(pid for pid, label in run.labels.items() if label == letter)
+        run.voted.add(participant.id)  # before any await: `_drop_out` reads it without the lock
+        cast_at = _now()
+        try:
+            async with self._db.begin() as conn:
+                await conn.execute(
+                    insert(votes).values(
+                        session_id=participant.session_id,
+                        round_number=run.round,
+                        participant_id=participant.id,
+                        target_participant=target_id,
+                        kind=VOTE,
+                        cast_at=cast_at,
+                    )
+                )
+                await conn.execute(
+                    update(participants).where(participants.c.id == participant.id).values(last_activity=cast_at)
+                )
+                await conn.execute(
+                    update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=cast_at)
+                )
+        except BaseException:
+            run.voted.discard(participant.id)  # not stored: they get an Abstention instead
+            raise
 
     @staticmethod
     def _end_voting_if_all_voted(run: _Run) -> None:

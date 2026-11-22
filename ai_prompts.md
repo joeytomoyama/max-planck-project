@@ -111,8 +111,11 @@ Answer with the Player Label only, e.g. "Player A".
 - **Failures:** an HTTP error, timeout, malformed or empty answer skips that
   message; for a Vote it falls back to a random Vote. The Session never stalls.
 - **Cache:** answers are cached per AI Agent and conversation state (Round,
-  purpose, ballot and the full chat history) for the life of the Session, so the
-  same state never triggers a second, different answer.
+  purpose, ballot, the full chat history and the AI Agent's own message number
+  in the Phase) for the life of the Session, so the same state never triggers a
+  second, different answer, while two replies scheduled before anyone else speaks
+  still get separate answers. A message identical to the AI Agent's previous one
+  is skipped, never posted.
 - **When AI Agents speak** (reply rate, delays, message cap) is set in
   `ai_agents:` in config.yml and does not depend on the LLM.
 
@@ -120,4 +123,7 @@ Answer with the Player Label only, e.g. "Player A".
 
 With `mock_mode: true` no prompts are used. AI Agents pick scripted, slightly
 varied casual lines (`_OPENINGS`, `_REPLIES`, `_TAILS` in `backend/app/llm.py`)
-and vote at random.
+and vote at random. With `mock_seed: <number>` in config.yml the choices are
+seeded (by the seed plus what the AI Agent sees; delays and reply decisions by the
+seed plus its Player Label), so the same Player Labels and Human messages give the
+same AI Agent messages and Votes in every Session. Unset, everything is random.

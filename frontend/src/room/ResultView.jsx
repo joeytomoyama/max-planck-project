@@ -1,3 +1,5 @@
+import YouAre from "./YouAre.jsx";
+
 // The Result after Round 2: the Decision Maker and the Votes per Player Label
 // from both Rounds combined. Human/AI types appear only when the server sends
 // them (`reveal_identities_at_end: true`); otherwise Player Labels only.
@@ -7,11 +9,7 @@ export default function ResultView({ playerLabel, result }) {
   return (
     <section>
       <h1>Result</h1>
-      {playerLabel && (
-        <p className="label" data-testid="player-label">
-          You are <strong>{playerLabel}</strong>
-        </p>
-      )}
+      <YouAre playerLabel={playerLabel} />
       <p className="decision-maker" data-testid="decision-maker">
         Decision Maker: <strong>{result.decision_maker}</strong>
       </p>

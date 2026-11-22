@@ -11,6 +11,8 @@ Protocol (JSON, every frame has a `type`):
                     result {counts: {"Player X": n}, decision_maker}, closed, error
 A refused join gets an `error` frame with a `reason`, then a close with a
 4xxx code (see CLOSE_CODES), so a client can show the right error view.
+A second `join` on an already joined socket gets `error` `already_joined`
+(the socket stays open).
 """
 
 from __future__ import annotations
@@ -95,6 +97,8 @@ class RealtimeHub:
                 await self._engine.chat(participant, frame.get("text"))
             elif kind == "vote":
                 await self._engine.vote(participant, frame.get("target"))
+            elif kind == "join":
+                await ws.send_json({"type": "error", "reason": "already_joined"})
             else:
                 await ws.send_json({"type": "error", "reason": "unsupported", "detail": str(kind)[:32]})
 

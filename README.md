@@ -46,6 +46,8 @@ show who was Human or AI on the Result). Sessions keep the Condition they were c
 
 **Mock mode** (`mock_mode: true`, the default) needs no LLM and no environment
 variables: AI Agents send scripted, slightly varied casual messages and vote at random.
+For repeatable demos set `mock_seed: <number>` in `config.yml`: with the same
+Player Labels and Human messages, AI Agents then write and vote the same way every time.
 
 **Real LLM**: any OpenAI-compatible endpoint. Set `mock_mode: false` and pass the
 endpoint through environment variables (never `config.yml`), e.g. in `.env`

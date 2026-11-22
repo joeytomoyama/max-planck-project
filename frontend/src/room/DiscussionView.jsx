@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import YouAre from "./YouAre.jsx";
 import useCountdown from "./useCountdown.js";
 
 // Must match MAX_CHAT_LENGTH in backend/app/session_engine.py (the server also cuts).
@@ -39,11 +40,7 @@ export default function DiscussionView({ playerLabel, round, deadline, messages,
           {seconds}s left
         </span>
       </p>
-      {playerLabel && (
-        <p className="label" data-testid="player-label">
-          You are <strong>{playerLabel}</strong>
-        </p>
-      )}
+      <YouAre playerLabel={playerLabel} />
       <ol className="chat" data-testid="chat-log" ref={listRef}>
         {messages.map((m, i) => (
           <li key={i} data-testid="chat-message" className={m.player_label === playerLabel ? "mine" : undefined}>

@@ -69,11 +69,16 @@ the wire.
    stores a `waiting` Session under the active Condition and returns a Room Code
    (`secrets.token_urlsafe(9)`: 12 URL-safe characters, ~72 bits, not enumerable)
    and the share link `/room/{room_code}`.
+   Every route uses the Room Code (`/room/:roomCode`, `/ws/{room_code}`,
+   `/api/sessions/{room_code}`) where SPEC.md says session id: the numeric id
+   counts up, so anyone could guess and enumerate Sessions, while the Room Code
+   (GLOSSARY "Room Code") is unguessable. The numeric id stays internal.
 2. **Join.** A browser on the share link opens `/ws/{room_code}` and sends
    `{"type":"join"}`. The engine reserves a Human slot with a random unused Player
    Label (A/B/C) and broadcasts `waiting {filled, total}`. A join is refused with
    an `error` frame and a 44xx close code when the Session is not found, full,
    already active, completed or expired; the page shows a matching message.
+   A second `join` on a socket that already joined gets `error {reason: already_joined}`.
 3. **Start.** When the last Human slot fills, the engine runs the same
    `waiting → active` transition as `POST /api/sessions/{rc}/start`: AI Agents are
    inserted for the Condition's AI slots, using the remaining letters in random order.
@@ -128,7 +133,9 @@ Participant is a Human or an AI Agent.
   Phase, and write short casual lines. Real-LLM replies that admit being an AI,
   bot, language model or assistant are dropped. See [ai_prompts.md](ai_prompts.md).
 - **No presence signals.** No typing indicators, no "Player X left" notice.
-  A Dropout is invisible to the others.
+  A Dropout is invisible to the others: once the Session has started,
+  `GET /api/sessions/{rc}` keeps listing a Dropout's Player Label (only Humans
+  drop out, so a vanishing label would reveal a Human).
 - **Blind voting.** After a Vote the voter alone gets `vote_recorded`; nobody sees
   counts or choices before the Result.
 
@@ -162,7 +169,11 @@ Round (`votes` is unique per Session, Round and Participant) with a `kind`:
 
 The Voting Phase ends early once every Participant still taking part (connected
 Humans plus AI Agents) has voted. Each Round's counts, abstentions and missing
-Votes are also stored in `rounds.vote_results` (JSONB).
+Votes are also stored in `rounds.vote_results` (JSONB). Storing a Vote and closing
+the Voting Phase take the same per-Session lock, so a Vote that got
+`vote_recorded` is always counted, and a Vote arriving after the close gets
+`vote_closed`. Who is present is taken at the close: a Human still connected at the
+deadline who disconnects a moment later gets an Abstention for that Round, not `missing`.
 
 ## Dropouts
 
@@ -221,6 +232,9 @@ The LLM sits behind `LLMClient` (`write_message`, `choose_vote`):
 
 - **Mock** (`mock_mode: true`, default): scripted casual lines with random
   variation and a random Vote. Needs no network and no environment variables.
+  An optional `mock_seed` makes it repeatable: answers are seeded by the seed and
+  what the AI Agent sees, and each runner's delays and reply choices by the seed
+  and its Player Label (not the Room Code, so a demo repeats in a new Session).
 - **OpenAI-compatible** (`mock_mode: false`): `POST {LLM_BASE_URL}/chat/completions`
   with the prompts from `config.yml`. Works with hosted APIs and local servers such
   as Ollama.
@@ -228,7 +242,9 @@ The LLM sits behind `LLMClient` (`write_message`, `choose_vote`):
 Failures never stall a Session: a failed or unusable chat answer skips that
 message; an unparseable vote answer becomes a random Vote. Answers are cached per
 AI Agent and conversation state for the life of the Session (SPEC.md: "cache
-responses per participant state"). Prompts, parameters and post-processing are in
+responses per participant state"); the state includes the AI Agent's own message
+ordinal in the Phase, so two replies scheduled in one quiet period differ, and a
+message identical to the AI Agent's previous one is never posted. Prompts, parameters and post-processing are in
 [ai_prompts.md](ai_prompts.md).
 
 ## Known limitations
