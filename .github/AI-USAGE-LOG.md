@@ -6,13 +6,14 @@ This document tracks all AI-assisted development work done on the Max Planck Pro
 prompts, and the exact models and tools used. The AI Agents' own runtime prompts (what the
 app sends to an LLM) are documented separately in [`ai_prompts.md`](../ai_prompts.md).
 
-The project was built in three stages:
+The project was built in three stages, followed by follow-up tickets:
 
 | Stage | Dates | Tool | Model | Result |
 |---|---|---|---|---|
 | 1. First attempt (scrapped) | 2026-11-20 | opencode with the mattpocock-skills | `qwen3.5:9b` on a local Ollama | Tickets #1-#8 and code for #1-#3, kept on the `qwen-attempt` branch |
 | 2. Review, restart and grilling | 2026-11-22 | Claude Code (Claude desktop app, Code tab) with the mattpocock-skills plugin | Claude Opus 5.5 (`claude-opus-5-5`) | Old code cleared, `GLOSSARY.md`, ADR 0001, spec issue #9, tickets #10-#17 |
 | 3. Rebuild from spec #9 | 2026-11-22 to 2026-11-23 | Claude Code (Claude desktop app) with the mattpocock-skills plugin and the Playwright MCP server | Claude Opus 5.5 (`claude-opus-5-5`) for the orchestrator and every implementer subagent | The current code on `spec-9-rebuild`, one branch per ticket |
+| 4. Ticket #19 and README | 2026-11-23 | Claude Code CLI (terminal) with the `implement`, `tdd` and `code-review` skills, then the Playwright MCP server | Claude Opus 5.5 (`claude-opus-5-5`) for the session and both review subagents | Slot count and Condition moved to the Researcher's `/waiting` page; README rewritten |
 
 ---
 
@@ -160,3 +161,33 @@ commit made by an agent ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anth
 The orchestrator and subagent transcripts of stage 3 are not exported into the repo.
 The issues above, the commits and their messages are the record of what each agent was
 asked to do and what it did.
+
+## Stage 4: Ticket #19 and README (Nov 23, 2026)
+
+- **Tool:** Claude Code CLI in a terminal on Linux, with the user's skills `implement`
+  (ticket workflow), `tdd` (red-green against black-box checks) and `code-review`
+  (Standards and Spec subagents). The Playwright MCP server was added mid-session
+  (`claude mcp add playwright -- npx @playwright/mcp@latest --browser chromium`).
+  Rootless Podman Compose ran the test stacks; `gh` read the issue.
+- **Model:** Claude Opus 5.5 (`claude-opus-5-5`) for the session and both review subagents.
+- **Full transcript** (every user prompt verbatim, every reply, tool calls summarised):
+  [`ai-prompts/2026-11-23-claude-code-ticket-19.md`](ai-prompts/2026-11-23-claude-code-ticket-19.md).
+
+What happened, in order of the user's prompts:
+
+1. `/implement #19`: Humans no longer see "n of m joined" (it gave away the Condition).
+   `POST /api/sessions` returns a secret Researcher token; a token-guarded
+   `GET /api/sessions/{rc}/researcher` feeds the Condition and live count on `/waiting`.
+   Black-box pytest checks in `backend/tests` were written red-first against the old
+   code. The code review found the public `GET /api/sessions/{rc}` still listed the
+   waiting Humans' Player Labels (another way to count them) and an unguarded
+   `POST /start`; both were fixed test-first. Commits `455566d`, `94da7e0`.
+2. "did you check it?": Claude listed what was and wasn't verified, including that the
+   browser check used a Python Playwright script because Playwright MCP wasn't connected.
+3. Setting up Playwright MCP, then "ok run the playwright tests now": the ticket's
+   check was redone with Playwright MCP (Researcher 0 → 1 → 2 of 3 → started; Human
+   tabs never see a count or receive one). Commit `26512ac`.
+4. "how would i now integrate a real llm": explained the existing OpenAI-compatible
+   client (ticket #15) and the local Ollama setup; then the README was rewritten to
+   include it and describe the repo, and this stage was added to the log.
+
