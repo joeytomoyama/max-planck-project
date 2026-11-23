@@ -86,7 +86,8 @@ the wire.
    already active, completed or expired; the page shows a matching message.
    A second `join` on a socket that already joined gets `error {reason: already_joined}`.
 3. **Start.** When the last Human slot fills, the engine runs the same
-   `waiting → active` transition as `POST /api/sessions/{rc}/start`: AI Agents are
+   `waiting → active` transition as `POST /api/sessions/{rc}/start` (Researcher
+  token required): AI Agents are
    inserted for the Condition's AI slots, using the remaining letters in random order.
    In `1_human_2_ai` the one Human starts the Session just by arriving.
 4. **Rounds.** One asyncio task per Session walks exactly two Rounds: Discussion
@@ -127,8 +128,10 @@ Participant is a Human or an AI Agent.
   Human how many AI Agents there are. Nothing a Human can reach carries them:
   `GET /api/sessions/{rc}` and `/config` (open to anyone with the Room Code, which
   is in every share link) return only status, Player Labels, Phase timings and the
-  number of Rounds; the `waiting` frame has no `filled`/`total` and goes only to
-  the joiner. The Researcher sees the Condition and "n of m Humans joined" on
+  number of Rounds, and no Player Labels while the Session is waiting (their
+  number would be the slot count); the `waiting` frame has no `filled`/`total` and
+  goes only to the joiner. `POST /api/sessions/{rc}/start` needs the Researcher
+  token too, since its response would count the Participants of an early start. The Researcher sees the Condition and "n of m Humans joined" on
   `/waiting`, from a route that needs the Researcher token.
 - **Random labels.** Humans get a random free letter on joining and AI Agents get
   the remaining letters in random order, so neither the letter nor join order
@@ -277,8 +280,9 @@ message identical to the AI Agent's previous one is never posted. Prompts, param
 - **Tie-break is random**, not smarter (SPEC.md: "arbitrary winner").
 - **The Researcher token lives only in the `/waiting` tab.** Reloading it loses
   the live count for that Session (the Session itself is unaffected).
-- **No authentication** beyond unguessable Room Codes and the Researcher token
-  for the slot count, no LLM rate limiting, and
+- **No authentication** beyond unguessable Room Codes and the per-Session
+  Researcher token (a shared secret, not a login: SPEC.md keeps auth out of scope,
+  but the Blind Condition needs the slot count kept from Humans), no LLM rate limiting, and
   simple console logs (all out of scope per SPEC.md).
 - **Thinking models** need `reasoning_effort: none` (e.g. qwen3.5 on Ollama) or a
   much larger `max_tokens`; some providers reject that parameter, so it is off by default.

@@ -138,3 +138,28 @@ async def test_a_human_is_not_told_when_another_human_joins_or_leaves():
         assert researcher_status(room, token).json()["filled"] == 1
     finally:
         await first.close()
+
+
+async def test_the_public_session_route_does_not_list_who_is_waiting():
+    created = create_session()
+    room = created["room_code"]
+    if researcher_status(room, created["researcher_token"]).json()["total"] < 2:
+        pytest.skip("needs a Condition with at least two Humans, or the join starts the Session")
+
+    ws, _ = await join(room)
+    try:
+        body = httpx.get(f"{APP_URL}/api/sessions/{room}").json()
+        assert body["status"] == "waiting"
+        assert body["player_labels"] == []  # its length would be the filled count
+    finally:
+        await ws.close()
+
+
+def test_manual_start_needs_the_researcher_token():
+    created = create_session()
+    room, token = created["room_code"], created["researcher_token"]
+    assert httpx.post(f"{APP_URL}/api/sessions/{room}/start").status_code == 403
+    assert httpx.post(f"{APP_URL}/api/sessions/{room}/start", headers={TOKEN_HEADER: "nope"}).status_code == 403
+    assert researcher_status(room, token).json()["status"] == "waiting"
+    assert httpx.post(f"{APP_URL}/api/sessions/{room}/start", headers={TOKEN_HEADER: token}).status_code == 200
+    assert researcher_status(room, token).json()["status"] == "active"

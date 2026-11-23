@@ -46,7 +46,7 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .config import CONDITIONS, Condition, Config
+from .config import Condition, Config
 from .persistence import (
     ACTIVE,
     AI,
@@ -295,12 +295,8 @@ class SessionEngine:
         """
         await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
-            session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
-            if session is None:
-                raise SessionNotFound(room_code)
-            expected = session.researcher_token_hash
-            if not token or expected is None or not hmac.compare_digest(_token_hash(token), expected):
-                raise WrongResearcherToken(room_code)
+            session = await self._load_session(conn, room_code, allow_expired=True)
+            _check_researcher_token(session, token)
             filled = (
                 await conn.execute(
                     select(func.count())
@@ -322,16 +318,24 @@ class SessionEngine:
             "total": condition.human_slots,
         }
 
+    async def require_researcher(self, room_code: str, token: str | None) -> None:
+        """Raises WrongResearcherToken unless `token` is this Session's Researcher token
+        (or SessionNotFound / SessionExpired)."""
+        await self.expire_inactive(room_code)
+        async with self._db.connect() as conn:
+            _check_researcher_token(await self._load_session(conn, room_code), token)
+
     async def public_state(self, room_code: str) -> dict[str, Any]:
-        """Status, Round, Phase, deadline and Player Labels (Dropouts included). Never Participant types.
-        Raises SessionNotFound or SessionExpired."""
+        """Status, Round, Phase, deadline and Player Labels (Dropouts included). Never Participant
+        types, and no Player Labels while waiting. Raises SessionNotFound or SessionExpired."""
         await self.expire_inactive(room_code)
         async with self._db.connect() as conn:
             session = await self._load_session(conn, room_code)
-            # Dropouts stay listed: only Humans drop out, so hiding their label would
-            # reveal a Human and signal presence (Blind Condition). Before the start a
-            # Human who leaves is deleted, so the Waiting Room still shows who is there.
-            labels = (
+            # While waiting, the labels are the Humans present: their number is the slot
+            # count, which gives away the Condition, so none are listed (Blind Condition).
+            # Once active, Dropouts stay listed: only Humans drop out, so hiding their label
+            # would reveal a Human and signal presence.
+            labels = [] if session.status == WAITING else (
                 await conn.execute(
                     select(participants.c.player_label)
                     .where(participants.c.session_id == session.id)
@@ -355,12 +359,13 @@ class SessionEngine:
             await self._load_session(conn, room_code)
 
     @staticmethod
-    async def _load_session(conn, room_code: str):
-        """The Session row for a Room Code. Raises SessionNotFound, or SessionExpired."""
+    async def _load_session(conn, room_code: str, *, allow_expired: bool = False):
+        """The Session row for a Room Code. Raises SessionNotFound, or SessionExpired
+        unless `allow_expired`."""
         session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
         if session is None:
             raise SessionNotFound(room_code)
-        if session.status == EXPIRED:
+        if session.status == EXPIRED and not allow_expired:
             raise SessionExpired(room_code)
         return session
 
@@ -505,12 +510,12 @@ class SessionEngine:
                         )
                     ).scalars()
                 )
-                humans, ais = CONDITIONS[session.condition]
-                if only_when_full and len(used) < humans:
+                condition = Condition.named(session.condition)
+                if only_when_full and len(used) < condition.human_slots:
                     return
                 free = [letter for letter in PLAYER_LABELS if letter not in used]
                 random.shuffle(free)
-                for label in free[:ais]:
+                for label in free[: condition.ai_slots]:
                     await conn.execute(
                         insert(participants).values(session_id=session.id, player_label=label, type=AI)
                     )
@@ -813,6 +818,12 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _check_researcher_token(session, token: str | None) -> None:
+    expected = session.researcher_token_hash
+    if not token or expected is None or not hmac.compare_digest(_token_hash(token), expected):
+        raise WrongResearcherToken(session.room_code)
+
+
 def _human_slots(condition: str) -> int:
     """Human slots of the Condition the Session was created under (not today's config)."""
-    return CONDITIONS[condition][0]
+    return Condition.named(condition).human_slots

@@ -3,8 +3,8 @@
 Responses carry Room Codes, statuses and Player Labels only, never
 Participant types, the Condition or Human slot counts (Blind Condition): the
 Room Code is in every Human's share link, so anything keyed by it alone is
-public. The one exception is the Researcher status route, which needs the
-Researcher token that `POST /sessions` returns (header `X-Researcher-Token`).
+public. The Researcher routes (status, manual start) need the Researcher token
+that `POST /sessions` returns (header `X-Researcher-Token`).
 An expired Session is refused with 410.
 """
 
@@ -56,9 +56,11 @@ def sessions_router(engine: SessionEngine, config: Config) -> APIRouter:
             return await engine.researcher_status(room_code, x_researcher_token)
 
     @router.post("/{room_code}/start")
-    async def start_session(room_code: str):
-        """Force waiting -> active: the same transition as the automatic start."""
+    async def start_session(room_code: str, x_researcher_token: str | None = Header(default=None)):
+        """Force waiting -> active (Researcher only): the same transition as the automatic start.
+        Open to Humans, its response would count the Participants of a Session started early."""
         with _session_errors():
+            await engine.require_researcher(room_code, x_researcher_token)
             await engine.start(room_code)
         return await engine.public_state(room_code)
 

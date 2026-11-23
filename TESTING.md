@@ -45,7 +45,7 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 | Real LLM via local Ollama (`qwen3.5:9b`) and a stub returning garbage / HTTP 500 / "As an AI…" | 1_human_2_ai |
 | README walkthrough: run on `APP_PORT`, create a Session, play it to the Result in mock mode; switch the Condition with `docker compose restart app` | 2_humans_1_ai, then 3_humans |
 | Votes cast within milliseconds of the Voting deadline (raw WebSockets, many Sessions): every `vote_recorded` Vote is in the Result and `rounds.vote_results`, later ones get `vote_closed`; a Human disconnecting just after the deadline gets an Abstention, just before it `missing` | 3_humans |
-| A Dropout's Player Label stays in `GET /api/sessions/{rc}`; a second `join` frame gets `error` `already_joined` | 2_humans_1_ai |
+| A Dropout's Player Label stays in `GET /api/sessions/{rc}` (once active); a second `join` frame gets `error` `already_joined` | 2_humans_1_ai |
 | AI Agents (mock, `reply_rate: 1`, several quick Human messages) never post the same line twice in a row | 1_human_2_ai |
 | `mock_seed: 42`: Sessions with the same Player Labels and no Human chat give identical AI Agent messages and Result, also after an app restart | 1_human_2_ai |
 
@@ -54,7 +54,8 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 `backend/tests` holds black-box pytest checks that talk to a running app over HTTP
 and WebSocket: the Researcher token (refused without it, with a wrong one or
 another Session's; Condition and slots with the right one), no Condition or slot
-count in the public REST routes, and a Human's `waiting` frame being exactly
+count in the public REST routes (no Player Labels while waiting), manual start
+only with the token, and a Human's `waiting` frame being exactly
 `{"type": "waiting"}` with no frame to them when another Human joins or leaves.
 
 ```sh
