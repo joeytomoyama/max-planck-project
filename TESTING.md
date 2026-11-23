@@ -33,7 +33,7 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 
 | Flow | Conditions |
 |---|---|
-| Waiting Room fills from empty and the Session starts on its own; the Researcher's `/waiting` shows the Condition and goes "0 → 1 → 2 → 3 of 3 Humans joined" → "started", while the Human tabs show no count and no Human WS frame has `filled`/`total` (#19; Python Playwright, Playwright MCP was unavailable) | all three (count flow: 3_humans) |
+| Waiting Room fills from empty and the Session starts on its own; the Researcher's `/waiting` shows the Condition and goes "0 → 1 → 2 → 3 of 3 Humans joined" → "started", while the Human tabs show no count and no Human WS frame has `filled`/`total`, no Human gets a frame when another joins, and the Human tabs make no `/api` calls (#19; "3 of 3" is never shown: the Session starts on the third join) | all three (count flow: 3_humans) |
 | Share link, Player Label shown ("You are Player X"), random labels | all three |
 | Discussion Rounds progress, countdown runs, chat appears in every tab, input closes when the Phase ends | 3_humans, 2_humans_1_ai, 1_human_2_ai |
 | AI Agents (mock) post an opening message, reply, stay under the cap, vote | 2_humans_1_ai, 1_human_2_ai |
