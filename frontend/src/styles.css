@@ -36,6 +36,14 @@ body {
   word-break: break-all;
 }
 
+.session-status {
+  margin-top: 1rem;
+}
+
+.session-status p {
+  margin: 0.25rem 0;
+}
+
 .error {
   color: #b00020;
 }

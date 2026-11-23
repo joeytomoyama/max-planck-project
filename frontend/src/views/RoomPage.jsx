@@ -14,7 +14,7 @@ export default function RoomPage() {
 
   switch (state.view) {
     case "waiting":
-      return <WaitingRoomView playerLabel={state.playerLabel} filled={state.filled} total={state.total} />;
+      return <WaitingRoomView playerLabel={state.playerLabel} />;
     case "discussion":
       return (
         <DiscussionView

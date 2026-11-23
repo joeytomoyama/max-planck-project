@@ -37,6 +37,22 @@ class Condition:
     human_slots: int
     ai_slots: int
 
+    @classmethod
+    def named(cls, name: str) -> "Condition":
+        humans, ais = CONDITIONS[name]
+        return cls(name=name, human_slots=humans, ai_slots=ais)
+
+    def describe(self) -> str:
+        """Plain words for the Researcher, e.g. "2 Humans + 1 AI Agent"."""
+        parts = [_count(self.human_slots, "Human")]
+        if self.ai_slots:
+            parts.append(_count(self.ai_slots, "AI Agent"))
+        return " + ".join(parts)
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
 
 @dataclass(frozen=True)
 class Timings:
@@ -216,8 +232,7 @@ def _condition(data: Mapping[str, Any]) -> Condition:
     value = data["condition"]
     if not isinstance(value, str) or value not in CONDITIONS:
         raise ConfigError(f"Invalid `condition: {value}` in config.yml. Valid options: {valid}")
-    humans, ais = CONDITIONS[value]
-    return Condition(name=value, human_slots=humans, ai_slots=ais)
+    return Condition.named(value)
 
 
 def _timings(section: Any) -> Timings:

@@ -15,8 +15,9 @@ docker compose up --build
 ```
 
 Open <http://localhost:8000/waiting>, click **Create Session** and share the link
-(`/room/<Room Code>`) with the Humans. The Session starts by itself when the last
-Human slot fills; AI Agents take the remaining slots.
+(`/room/<Room Code>`) with the Humans. The page shows the active Condition and
+"n of m Humans joined" (Humans themselves see no count). The Session starts by
+itself when the last Human slot fills; AI Agents take the remaining slots.
 
 - Other host port: `APP_PORT=8080 docker compose up --build`
   (PowerShell: `$env:APP_PORT="8080"; docker compose up --build`), or set it in `.env`.
@@ -77,7 +78,9 @@ Step-by-step checks: [TESTING.md](TESTING.md#real-llm-via-a-local-ollama).
   every connected Participant has voted). Clients only display the countdown.
 - **Blind Condition enforced on the server.** Only Player Labels (Player A/B/C,
   assigned at random) ever leave the server; no REST response or WebSocket frame
-  carries a Participant's type, except the Result when the reveal is on. AI Agent
+  carries a Participant's type, except the Result when the reveal is on. Humans
+  never see the Condition or a slot count; the Researcher's `/waiting` page gets
+  them with a secret Researcher token returned on Session creation. AI Agent
   messages and Votes go through the same code path as Human ones. No typing indicators.
 - **Voting ([ADR 0001](docs/adr/0001-voting-design-for-human-vs-ai-choice.md)).**
   Self-votes allowed, Round 1 results hidden ("Your vote has been recorded" only),
@@ -88,6 +91,7 @@ Step-by-step checks: [TESTING.md](TESTING.md#real-llm-via-a-local-ollama).
   Session continues and is flagged `incomplete`.
 - **Room Codes** are random URL-safe tokens (~72 bits); no other auth.
 - **Testing** is Playwright MCP against the running app plus the manual checklist in
-  TESTING.md. No unit test suite or CI, per SPEC.md.
+  TESTING.md, and a few black-box pytest checks in `backend/tests` for the
+  Researcher token. No unit test suite or CI, per SPEC.md.
 
 Known limitations are listed in [ARCHITECTURE.md](ARCHITECTURE.md#known-limitations).

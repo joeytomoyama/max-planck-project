@@ -10,8 +10,6 @@ const initialState = {
   playerLabels: [], // every Player Label in the Session (the ballot)
   votedRound: null, // Round whose Vote the server acknowledged
   result: null, // {counts: {"Player X": n}, decision_maker, types: {"Player X": "human"|"ai"} only if the reveal is on}
-  filled: 0,
-  total: 0,
   round: null,
   deadline: null, // server deadline of the current Phase, in *client* clock ms
   messages: [], // [{player_label, text, sent_at}] of the current Round's Discussion Phase
@@ -24,7 +22,7 @@ function reducer(state, action) {
     case "joined":
       return { ...state, playerLabel: action.player_label };
     case "waiting":
-      return { ...state, view: "waiting", filled: action.filled, total: action.total };
+      return { ...state, view: "waiting" };
     case "phase": {
       // Shift the server deadline by the measured clock offset so every client
       // counts down to the same instant whatever its own clock says.

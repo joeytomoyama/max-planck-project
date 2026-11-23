@@ -2,7 +2,8 @@
 
 Per SPEC.md there is no unit/integration test suite and no CI. The app is tested
 end to end in a real browser with **Playwright MCP** (driven by the coding agent),
-plus the manual checklist below for what that does not cover.
+plus the manual checklist below for what that does not cover, and a few black-box
+checks (see [Automated checks](#automated-checks-researcher-token)).
 
 ## Setup for a test run
 
@@ -32,7 +33,7 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 
 | Flow | Conditions |
 |---|---|
-| Waiting Room fills from empty ("n of m joined") and the Session starts on its own | all three |
+| Waiting Room fills from empty and the Session starts on its own; the Researcher's `/waiting` shows the Condition and goes "0 → 1 → 2 → 3 of 3 Humans joined" → "started", while the Human tabs show no count and no Human WS frame has `filled`/`total` (#19; Python Playwright, Playwright MCP was unavailable) | all three (count flow: 3_humans) |
 | Share link, Player Label shown ("You are Player X"), random labels | all three |
 | Discussion Rounds progress, countdown runs, chat appears in every tab, input closes when the Phase ends | 3_humans, 2_humans_1_ai, 1_human_2_ai |
 | AI Agents (mock) post an opening message, reply, stay under the cap, vote | 2_humans_1_ai, 1_human_2_ai |
@@ -47,6 +48,23 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 | A Dropout's Player Label stays in `GET /api/sessions/{rc}`; a second `join` frame gets `error` `already_joined` | 2_humans_1_ai |
 | AI Agents (mock, `reply_rate: 1`, several quick Human messages) never post the same line twice in a row | 1_human_2_ai |
 | `mock_seed: 42`: Sessions with the same Player Labels and no Human chat give identical AI Agent messages and Result, also after an app restart | 1_human_2_ai |
+
+## Automated checks: Researcher token
+
+`backend/tests` holds black-box pytest checks that talk to a running app over HTTP
+and WebSocket: the Researcher token (refused without it, with a wrong one or
+another Session's; Condition and slots with the right one), no Condition or slot
+count in the public REST routes, and a Human's `waiting` frame being exactly
+`{"type": "waiting"}` with no frame to them when another Human joins or leaves.
+
+```sh
+docker compose up --build -d
+pip install -r backend/requirements-dev.txt
+APP_URL=http://localhost:8000 pytest backend/tests
+```
+
+Some checks need more Human slots and skip otherwise; run once with
+`condition: 3_humans` to cover all of them.
 
 ## Manual checklist
 
@@ -65,8 +83,12 @@ been recorded", the Result), plus captured network traffic for the Blind Conditi
 
 For each of `3_humans`, `2_humans_1_ai`, `1_human_2_ai`: edit `condition:`, run
 `docker compose restart app`, create a new Session.
-- [ ] The Waiting Room shows `0 of 3`, `0 of 2` or `0 of 1` joined, and the Session
-      starts when that many tabs have joined.
+- [ ] `/waiting` shows `Condition: 3 Humans`, `2 Humans + 1 AI Agent` or
+      `1 Human + 2 AI Agents`, and `0 of 3`, `0 of 2` or `0 of 1 Humans joined`.
+- [ ] The Session starts when that many tabs have joined, and `/waiting` then says
+      it has started.
+- [ ] The Human tabs show only "You are Player X" and "Waiting for others to join",
+      never a count.
 
 ### Real LLM via a local Ollama
 

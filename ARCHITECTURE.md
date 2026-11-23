@@ -67,15 +67,21 @@ the wire.
 
 1. **Create.** `POST /api/sessions` (the Create Session button on `/waiting`)
    stores a `waiting` Session under the active Condition and returns a Room Code
-   (`secrets.token_urlsafe(9)`: 12 URL-safe characters, ~72 bits, not enumerable)
-   and the share link `/room/{room_code}`.
+   (`secrets.token_urlsafe(9)`: 12 URL-safe characters, ~72 bits, not enumerable),
+   the share link `/room/{room_code}` and a secret Researcher token (only its
+   SHA-256 is stored). `/waiting` keeps the token in memory and polls
+   `GET /api/sessions/{rc}/researcher` (header `X-Researcher-Token`) every second
+   for the Condition and "n of m Humans joined" until the Session starts; without
+   the right token that route answers 403.
    Every route uses the Room Code (`/room/:roomCode`, `/ws/{room_code}`,
    `/api/sessions/{room_code}`) where SPEC.md says session id: the numeric id
    counts up, so anyone could guess and enumerate Sessions, while the Room Code
    (GLOSSARY "Room Code") is unguessable. The numeric id stays internal.
 2. **Join.** A browser on the share link opens `/ws/{room_code}` and sends
    `{"type":"join"}`. The engine reserves a Human slot with a random unused Player
-   Label (A/B/C) and broadcasts `waiting {filled, total}`. A join is refused with
+   Label (A/B/C) and sends the joiner alone a bare `waiting` frame (no slot count,
+   and no frame to the others on a join or leave, so Humans cannot count each
+   other). A join is refused with
    an `error` frame and a 44xx close code when the Session is not found, full,
    already active, completed or expired; the page shows a matching message.
    A second `join` on a socket that already joined gets `error {reason: already_joined}`.
@@ -117,11 +123,13 @@ Participant is a Human or an AI Agent.
   no type field. The type is stored in `participants.type` for the Researcher and
   read in exactly one place that reaches the wire: the Result, and only when
   `reveal_identities_at_end: true`.
-- **No config leak.** `GET /api/sessions/{rc}/config` returns only the Phase
-  timings and the number of Rounds, never the Condition (which would tell a Human
-  how many AI Agents there are). The `waiting` frame shows the Human slot count
-  (`1 of 2 joined`); that is needed for the Waiting Room and is not tied to any
-  Player Label.
+- **No Condition leak.** The Condition and the Human slot count would tell a
+  Human how many AI Agents there are. Nothing a Human can reach carries them:
+  `GET /api/sessions/{rc}` and `/config` (open to anyone with the Room Code, which
+  is in every share link) return only status, Player Labels, Phase timings and the
+  number of Rounds; the `waiting` frame has no `filled`/`total` and goes only to
+  the joiner. The Researcher sees the Condition and "n of m Humans joined" on
+  `/waiting`, from a route that needs the Researcher token.
 - **Random labels.** Humans get a random free letter on joining and AI Agents get
   the remaining letters in random order, so neither the letter nor join order
   gives anything away.
@@ -206,12 +214,13 @@ practice this hits abandoned Waiting Rooms and Sessions orphaned by a restart.
 
 ## Data model
 
-Created on startup by `persistence.create_schema()`; changing a table needs
-`docker compose down -v` (no migrations).
+Created on startup by `persistence.create_schema()`. There are no migrations:
+a column added later is also added with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+(`_ADDED_COLUMNS`); anything else needs `docker compose down -v`.
 
 | Table | Columns |
 |---|---|
-| `sessions` | `id`, `room_code` (unique), `condition`, `status` (`waiting`/`active`/`completed`/`expired`), `incomplete`, `created_at`, `last_activity`, `expires_at`, `completed_at`, `decision_maker` (letter), `decided_by_tiebreak` |
+| `sessions` | `id`, `room_code` (unique), `condition`, `status` (`waiting`/`active`/`completed`/`expired`), `incomplete`, `created_at`, `last_activity`, `expires_at`, `completed_at`, `decision_maker` (letter), `decided_by_tiebreak`, `researcher_token_hash` |
 | `participants` | `id`, `session_id`, `player_label` (letter, unique per Session), `type` (`human`/`ai`), `joined_at`, `last_activity`, `dropped_out_at` |
 | `rounds` | `session_id`, `round_number` (1–2), `discussion_start`, `discussion_end`, `voting_end`, `vote_results` (JSONB) |
 | `votes` | `session_id`, `round_number`, `participant_id`, `target_participant` (nullable), `kind` (`vote`/`abstention`/`missing`), `cast_at` |
@@ -266,7 +275,10 @@ message identical to the AI Agent's previous one is never posted. Prompts, param
   keeps the Condition it was created with, but timings, AI Agent settings and
   the reveal setting are read from the config at the time.
 - **Tie-break is random**, not smarter (SPEC.md: "arbitrary winner").
-- **No authentication** beyond unguessable Room Codes, no LLM rate limiting, and
+- **The Researcher token lives only in the `/waiting` tab.** Reloading it loses
+  the live count for that Session (the Session itself is unaffected).
+- **No authentication** beyond unguessable Room Codes and the Researcher token
+  for the slot count, no LLM rate limiting, and
   simple console logs (all out of scope per SPEC.md).
 - **Thinking models** need `reasoning_effort: none` (e.g. qwen3.5 on Ollama) or a
   much larger `max_tokens`; some providers reject that parameter, so it is off by default.

@@ -53,6 +53,8 @@ sessions = Table(
     Column("completed_at", DateTime(timezone=True)),
     Column("decision_maker", String(16)),  # Player Label of the Decision Maker
     Column("decided_by_tiebreak", Boolean),
+    # SHA-256 of the Researcher token returned once by `POST /api/sessions`; never sent to a Human.
+    Column("researcher_token_hash", String(64)),
     CheckConstraint("status IN ('waiting', 'active', 'completed', 'expired')", name="sessions_status"),
 )
 
@@ -118,12 +120,18 @@ def create_engine(url: str | None = None) -> AsyncEngine:
     return create_async_engine(url or database_url(), pool_pre_ping=True)
 
 
+# Columns added after the first release, for databases created before them.
+_ADDED_COLUMNS = ("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS researcher_token_hash VARCHAR(64)",)
+
+
 async def create_schema(engine: AsyncEngine, attempts: int = 30, delay: float = 1.0) -> None:
     """Create all tables if missing. Retries while Postgres is still starting up."""
     for attempt in range(1, attempts + 1):
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(metadata.create_all)
+                for statement in _ADDED_COLUMNS:  # create_all never alters an existing table
+                    await conn.execute(text(statement))
             log.info("Database schema ready")
             return
         except Exception as exc:  # noqa: BLE001 - connection errors vary by driver/startup stage

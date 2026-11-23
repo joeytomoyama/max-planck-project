@@ -32,6 +32,8 @@ an acknowledged Vote is always in the Round's results. After the last Round, the
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import random
 import re
@@ -44,7 +46,7 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .config import CONDITIONS, Config
+from .config import CONDITIONS, Condition, Config
 from .persistence import (
     ACTIVE,
     AI,
@@ -103,6 +105,19 @@ class NotWaiting(Exception):
 
 class SessionExpired(Exception):
     """The Session expired after inactivity; REST refuses it (410)."""
+
+
+class WrongResearcherToken(Exception):
+    """A Researcher-only request without the Session's Researcher token, or with a wrong one."""
+
+
+@dataclass(frozen=True)
+class CreatedSession:
+    """`researcher_token` is the only copy: just its hash is stored. It goes to the
+    Researcher who created the Session and never into the share link."""
+
+    room_code: str
+    researcher_token: str
 
 
 @dataclass(frozen=True)
@@ -254,15 +269,58 @@ class SessionEngine:
 
     # --- Session creation and lookup -------------------------------------
 
-    async def create_session(self) -> str:
-        """Create a `waiting` Session under the active Condition; return its Room Code."""
+    async def create_session(self) -> CreatedSession:
+        """Create a `waiting` Session under the active Condition, with a fresh Researcher token."""
         room_code = secrets.token_urlsafe(9)  # 12 URL-safe chars, ~72 bits: not enumerable
+        token = secrets.token_urlsafe(24)
         async with self._db.begin() as conn:
             await conn.execute(
-                insert(sessions).values(room_code=room_code, condition=self._config.condition.name, status=WAITING)
+                insert(sessions).values(
+                    room_code=room_code,
+                    condition=self._config.condition.name,
+                    status=WAITING,
+                    researcher_token_hash=_token_hash(token),
+                )
             )
         log.info("Created Session %s (condition=%s)", room_code, self._config.condition.name)
-        return room_code
+        return CreatedSession(room_code=room_code, researcher_token=token)
+
+    async def researcher_status(self, room_code: str, token: str | None) -> dict[str, Any]:
+        """The Condition and Human slots filled/total, for the Researcher only.
+
+        Never part of anything a Human receives: the slot count would give away
+        how many Humans there are, i.e. the Condition (Blind Condition). Raises
+        SessionNotFound, or WrongResearcherToken for a missing or wrong token.
+        An expired Session is reported as such, not refused.
+        """
+        await self.expire_inactive(room_code)
+        async with self._db.connect() as conn:
+            session = (await conn.execute(select(sessions).where(sessions.c.room_code == room_code))).first()
+            if session is None:
+                raise SessionNotFound(room_code)
+            expected = session.researcher_token_hash
+            if not token or expected is None or not hmac.compare_digest(_token_hash(token), expected):
+                raise WrongResearcherToken(room_code)
+            filled = (
+                await conn.execute(
+                    select(func.count())
+                    .select_from(participants)
+                    .where(participants.c.session_id == session.id, participants.c.type == HUMAN)
+                )
+            ).scalar_one()
+        condition = Condition.named(session.condition)
+        return {
+            "room_code": room_code,
+            "status": session.status,
+            "condition": {
+                "name": condition.name,
+                "description": condition.describe(),
+                "humans": condition.human_slots,
+                "ai_agents": condition.ai_slots,
+            },
+            "filled": filled,
+            "total": condition.human_slots,
+        }
 
     async def public_state(self, room_code: str) -> dict[str, Any]:
         """Status, Round, Phase, deadline and Player Labels (Dropouts included). Never Participant types.
@@ -342,8 +400,8 @@ class SessionEngine:
         return JoinedParticipant(id=participant_id, session_id=session.id, room_code=room_code, player_label=label)
 
     async def connected(self, participant: JoinedParticipant) -> None:
-        """The joiner's socket is registered: tell them their label and everyone the
-        slot count, then start the Session if this filled the last Human slot."""
+        """The joiner's socket is registered: tell them their label and that they
+        are waiting, then start the Session if this filled the last Human slot."""
         await self._emit(
             Event(
                 participant.room_code,
@@ -356,7 +414,10 @@ class SessionEngine:
             # Reserved a slot before the start but connected just after it: catch up.
             await self._emit(Event(participant.room_code, self._phase_frame(run), recipient=participant.id))
             return
-        await self._emit_waiting(participant.room_code, participant.session_id)
+        # Only the joiner hears this, and without a slot count: a count, or a frame to
+        # everyone on each join/leave, would let Humans count each other (Blind Condition).
+        # The Researcher sees the count via `researcher_status`.
+        await self._emit(Event(participant.room_code, {"type": "waiting"}, recipient=participant.id))
         try:
             await self.start(participant.room_code, only_when_full=True)
         except (NotWaiting, SessionNotFound):
@@ -380,7 +441,6 @@ class SessionEngine:
                     update(sessions).where(sessions.c.id == participant.session_id).values(last_activity=func.now())
                 )
         log.info("Player %s left Session %s before the start", participant.player_label, participant.room_code)
-        await self._emit_waiting(participant.room_code, participant.session_id)
 
     async def _drop_out(self, conn, participant: JoinedParticipant) -> None:
         """Mark a Dropout: `dropped_out_at`, Session `incomplete`, and every Vote
@@ -422,18 +482,6 @@ class SessionEngine:
             await conn.execute(pg_insert(votes).values(rows).on_conflict_do_nothing())
         self._end_voting_if_all_voted(run)
         log.info("Player %s dropped out of Session %s (Incomplete Session)", participant.player_label, participant.room_code)
-
-    async def _emit_waiting(self, room_code: str, session_id: int) -> None:
-        async with self._db.connect() as conn:
-            condition = (
-                await conn.execute(select(sessions.c.condition).where(sessions.c.id == session_id))
-            ).scalar_one()
-            filled = (
-                await conn.execute(
-                    select(func.count()).select_from(participants).where(participants.c.session_id == session_id)
-                )
-            ).scalar_one()
-        await self._emit(Event(room_code, {"type": "waiting", "filled": filled, "total": _human_slots(condition)}))
 
     # --- Start -----------------------------------------------------------
 
@@ -759,6 +807,10 @@ class SessionEngine:
 
     async def _reject(self, participant: JoinedParticipant, reason: str) -> None:
         await self._emit(Event(participant.room_code, {"type": "error", "reason": reason}, recipient=participant.id))
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _human_slots(condition: str) -> int:
