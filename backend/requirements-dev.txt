@@ -1,0 +1,5 @@
+# Only for the black-box checks in backend/tests (not installed in the app image).
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1
+websockets==14.1

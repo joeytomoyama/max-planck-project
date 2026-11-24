@@ -26,7 +26,10 @@ The neutral name a Participant is shown as within its Session ("Player A", "Play
 _Avoid_: Participant ID, player number
 
 **Blind Condition**:
-The rule that no Participant can tell from the platform whether any other Participant is a Human or an AI Agent.
+The rule that no Participant can tell from the platform whether any other Participant is a Human or an AI Agent. This includes the Condition itself and the Human slot count, which would reveal how many AI Agents there are.
+
+**Researcher token**:
+The secret returned to the Researcher when a Session is created. It unlocks that Session's Condition and Human slot count, and is never part of the share link.
 
 ### Setup
 
@@ -43,7 +46,7 @@ The random, URL-safe code that identifies a Session to the people joining it.
 _Avoid_: Session ID (in anything a Participant sees), invite code
 
 **Waiting Room**:
-Where Humans wait until every Human slot of their Session is taken; the Session then starts on its own. The active Condition decides how many Human slots there are.
+Where Humans wait until every Human slot of their Session is taken; the Session then starts on its own. The active Condition decides how many Human slots there are. Humans in the Waiting Room see only their Player Label, never how many slots are filled or in total (that would give away the Condition); only the Researcher sees the count, on `/waiting`.
 _Avoid_: Lobby
 
 ### Play

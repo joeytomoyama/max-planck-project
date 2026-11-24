@@ -1,0 +1,128 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #1d1d1f;
+  background: #f6f6f8;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+.status {
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.share {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.share p {
+  margin: 0;
+  width: 100%;
+}
+
+.share a {
+  word-break: break-all;
+}
+
+.session-status {
+  margin-top: 1rem;
+}
+
+.session-status p {
+  margin: 0.25rem 0;
+}
+
+.error {
+  color: #b00020;
+}
+
+
+.phase-bar {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+}
+
+.chat {
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0.5rem;
+  height: 320px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+}
+
+.chat li {
+  padding: 0.25rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat .who {
+  font-weight: 600;
+  margin-right: 0.5rem;
+}
+
+.chat li.mine .who {
+  color: #1a5fb4;
+}
+
+.chat-input {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.chat-input input {
+  flex: 1;
+  padding: 0.5rem;
+}
+
+.ballot {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ballot button {
+  padding: 0.6rem 1rem;
+  font-size: 1rem;
+}
+
+.recorded {
+  font-weight: 600;
+}
+
+.counts {
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.counts caption {
+  text-align: left;
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.counts th,
+.counts td {
+  padding: 0.25rem 1rem 0.25rem 0;
+  text-align: left;
+}
