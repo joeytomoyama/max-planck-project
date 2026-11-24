@@ -12,7 +12,7 @@ The project was built in three stages, followed by follow-up tickets:
 |---|---|---|---|---|
 | 1. First attempt (scrapped) | 2026-11-20 | opencode with the mattpocock-skills | `qwen3.5:9b` on a local Ollama | Tickets #1-#8 and code for #1-#3, kept on the `qwen-attempt` branch |
 | 2. Review, restart and grilling | 2026-11-22 | Claude Code (Claude desktop app, Code tab) with the mattpocock-skills plugin | Claude Opus 5.5 (`claude-opus-5-5`) | Old code cleared, `GLOSSARY.md`, ADR 0001, spec issue #9, tickets #10-#17 |
-| 3. Rebuild from spec #9 | 2026-11-22 to 2026-11-23 | Claude Code (Claude desktop app) with the mattpocock-skills plugin and the Playwright MCP server | Claude Opus 5.5 (`claude-opus-5-5`) for the orchestrator and every implementer subagent | The current code on `spec-9-rebuild`, one branch per ticket |
+| 3. Rebuild from spec #9 | 2026-11-22 to 2026-11-23 | Claude Code (Claude desktop app) with the mattpocock-skills plugin and the Playwright MCP server | Claude Opus 5.5 (`claude-opus-5-5`) for the orchestrator and every implementer subagent | The current code (integration branch `spec-9-rebuild`, merged into `main` via PR #18), one branch per ticket |
 | 4. Ticket #19 and README | 2026-11-23 | Claude Code CLI (terminal) with the `implement`, `tdd` and `code-review` skills, then the Playwright MCP server | Claude Opus 5.5 (`claude-opus-5-5`) for the session and both review subagents | Slot count and Condition moved to the Researcher's `/waiting` page; README rewritten |
 
 ---
@@ -89,7 +89,7 @@ The following were key prompts (or prompt categories) used:
 ## Stage 2: Review, restart and grilling (Nov 22, 2026)
 
 - **Tool:** Claude Code in the Claude desktop app (Code tab), mattpocock-skills plugin
-  (`ask-matt`, `grilling`, `domain-modeling`).
+  (`ask-matt`, `grilling`, `domain-modeling`, then `to-spec` and `to-tickets`).
 - **Model:** Claude Opus 5.5 (`claude-opus-5-5`).
 - **Full transcript** (every user prompt verbatim, every reply, tool calls summarised):
   [`ai-prompts/2026-11-22-claude-code-review-and-grilling.md`](ai-prompts/2026-11-22-claude-code-review-and-grilling.md).
@@ -108,7 +108,8 @@ What happened, in order of the user's prompts:
    reveal-setting decisions, and the one-app-image decision (commit `98e080c`).
 4. From those decisions, spec issue #9 ("Spec: Multi-participant Human-AI experiment
    platform (rebuild)") and its vertical-slice tickets #10-#17 were filed on GitHub,
-   replacing the stale #1-#8. The issues themselves are the record of that output.
+   replacing the stale #1-#8, in a follow-up session with `/to-spec` and `/to-tickets`:
+   [`ai-prompts/2026-11-22-claude-code-spec-and-tickets.md`](ai-prompts/2026-11-22-claude-code-spec-and-tickets.md).
 
 ## Stage 3: Rebuild from spec #9 (Nov 22-23, 2026)
 
@@ -156,11 +157,14 @@ The issues are the authoritative text of those prompts:
 Read them with `gh issue view <n> --repo joeytomoyama/max-planck-project`. Every
 commit made by an agent ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
-### Not exported
+### Full transcript
 
-The orchestrator and subagent transcripts of stage 3 are not exported into the repo.
-The issues above, the commits and their messages are the record of what each agent was
-asked to do and what it did.
+[`ai-prompts/2026-11-23-claude-code-rebuild-spec-9.md`](ai-prompts/2026-11-23-claude-code-rebuild-spec-9.md):
+every user prompt verbatim and every orchestrator reply, then every subagent's prompt
+verbatim and final report (implementers, mergers, both code-review subagents and the
+review-fix implementer). Tool calls are summarised in one line, tool outputs left out.
+The same session also covers the send-off checks of 2026-11-24 (readiness review,
+this export, the stale-doc cleanup and the merge of PR #18).
 
 ## Stage 4: Ticket #19 and README (Nov 23, 2026)
 
